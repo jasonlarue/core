@@ -208,6 +208,8 @@ const expectedTables: Record<string, TableSpec> = {
       { name: 'auto_off_minutes', notNull: true, default: 30 },
       { name: 'away_start', notNull: false, default: undefined },
       { name: 'away_return', notNull: false, default: undefined },
+      { name: 'age', notNull: false, default: undefined },
+      { name: 'sex', notNull: false, default: undefined },
       { name: 'created_at', notNull: true, default: 'sql' },
       { name: 'updated_at', notNull: true, default: 'sql' },
     ],

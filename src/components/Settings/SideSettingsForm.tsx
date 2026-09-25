@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { User, Plane, Timer, Infinity as InfinityIcon } from 'lucide-react'
+import { User, Plane, Timer, HeartPulse, Infinity as InfinityIcon } from 'lucide-react'
 import { trpc } from '@/src/utils/trpc'
 import { Toggle } from './Toggle'
 
@@ -12,7 +12,17 @@ interface SideData {
   alwaysOn: boolean
   autoOffEnabled: boolean
   autoOffMinutes: number
+  age?: number | null
+  sex?: Sex | null
 }
+
+type Sex = 'female' | 'male'
+
+const SEX_OPTIONS: { value: Sex | null, label: string }[] = [
+  { value: 'female', label: 'Female' },
+  { value: 'male', label: 'Male' },
+  { value: null, label: 'Not set' },
+]
 
 interface SideSettingsFormProps {
   side: 'left' | 'right'
@@ -29,7 +39,8 @@ interface SideSettingsFormProps {
 const AUTO_OFF_DURATION_OPTIONS = [5, 10, 15, 30, 45, 60, 90, 120] as const
 
 /**
- * Per-side settings: name, away mode, always on, and auto-off for a single side.
+ * Per-side settings: name, away mode, always on, auto-off, and the optional
+ * sleeper profile (age, sex) used by the sleep-stage model.
  */
 export function SideSettingsForm({ side, sideData, presenceAvailable }: SideSettingsFormProps) {
   const d = sideData ?? {
@@ -39,12 +50,14 @@ export function SideSettingsForm({ side, sideData, presenceAvailable }: SideSett
     alwaysOn: false,
     autoOffEnabled: false,
     autoOffMinutes: 30,
+    age: null,
+    sex: null,
   }
 
   // key forces remount when server data changes, replacing the useEffect sync pattern
   return (
     <SideCard
-      key={`${d.name}-${d.awayMode}-${d.alwaysOn}-${d.autoOffEnabled}-${d.autoOffMinutes}`}
+      key={`${d.name}-${d.awayMode}-${d.alwaysOn}-${d.autoOffEnabled}-${d.autoOffMinutes}-${d.age ?? ''}-${d.sex ?? ''}`}
       data={d}
       presenceAvailable={presenceAvailable}
     />
@@ -58,6 +71,8 @@ function SideCard({ data, presenceAvailable }: { data: SideData, presenceAvailab
   const [alwaysOn, setAlwaysOn] = useState(data.alwaysOn)
   const [autoOffEnabled, setAutoOffEnabled] = useState(data.autoOffEnabled)
   const [autoOffMinutes, setAutoOffMinutes] = useState(data.autoOffMinutes)
+  const [age, setAge] = useState(data.age != null ? String(data.age) : '')
+  const [sex, setSex] = useState<Sex | null>(data.sex ?? null)
 
   const mutation = trpc.settings.updateSide.useMutation({
     onSuccess: () => utils.settings.getAll.invalidate(),
@@ -118,6 +133,27 @@ function SideCard({ data, presenceAvailable }: { data: SideData, presenceAvailab
     else {
       mutation.mutate({ side: data.side, autoOffEnabled: newVal })
     }
+  }
+
+  function handleAgeBlur() {
+    const trimmed = age.trim()
+    const current = data.age ?? null
+    if (trimmed === '') {
+      if (current !== null) mutation.mutate({ side: data.side, age: null })
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 120) {
+      setAge(current != null ? String(current) : '') // revert
+      return
+    }
+    if (parsed !== current) mutation.mutate({ side: data.side, age: parsed })
+  }
+
+  function handleSexChange(value: Sex | null) {
+    if (value === sex) return
+    setSex(value)
+    mutation.mutate({ side: data.side, sex: value })
   }
 
   function handleAutoOffMinutesChange(minutes: number) {
@@ -232,6 +268,57 @@ function SideCard({ data, presenceAvailable }: { data: SideData, presenceAvailab
           </div>
         </div>
       )}
+
+      {/* Sleeper profile — optional inputs to the sleep-stage model */}
+      <div className="mt-3 border-t border-zinc-800 pt-3">
+        <div className="flex items-center gap-2">
+          <HeartPulse size={14} className={age || sex ? 'text-sky-400' : 'text-zinc-500'} />
+          <span className="text-sm text-zinc-300">Sleeper profile</span>
+        </div>
+        <p className="mt-1 text-xs text-zinc-500">
+          Optional. Used only for sleep stages — the model was trained with age and sex. Stays on your pod.
+        </p>
+        <div className="mt-2 flex items-end gap-3">
+          <div className="w-20 shrink-0">
+            <label htmlFor={`age-${data.side}`} className="mb-1.5 block text-xs font-medium text-zinc-400">Age</label>
+            <input
+              id={`age-${data.side}`}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={120}
+              value={age}
+              onChange={e => setAge(e.target.value)}
+              onBlur={handleAgeBlur}
+              onKeyDown={handleNameKeyDown}
+              disabled={isPending}
+              placeholder="—"
+              className="h-11 w-full rounded-lg border border-zinc-700 bg-zinc-800/50 px-3 text-sm font-medium text-white outline-none transition-colors focus:border-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <span className="mb-1.5 block text-xs font-medium text-zinc-400">Sex</span>
+            <div className="flex gap-1.5" role="group" aria-label={`Sex for ${sideLabel} side`}>
+              {SEX_OPTIONS.map(opt => (
+                <button
+                  key={opt.label}
+                  type="button"
+                  onClick={() => handleSexChange(opt.value)}
+                  disabled={isPending}
+                  aria-pressed={sex === opt.value}
+                  className={`h-11 min-w-0 flex-1 truncate rounded-lg px-2 text-xs font-medium transition-colors disabled:opacity-50 ${
+                    sex === opt.value
+                      ? 'bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/40'
+                      : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {mutation.error && (
         <p className="mt-2 text-xs text-red-400">{mutation.error.message}</p>

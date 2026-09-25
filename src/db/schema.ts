@@ -89,6 +89,10 @@ export const sideSettings = sqliteTable('side_settings', {
   autoOffMinutes: integer('auto_off_minutes').notNull().default(30),
   awayStart: text('away_start'), // ISO datetime when away mode activates
   awayReturn: text('away_return'), // ISO datetime when away mode deactivates
+  // Optional sleeper profile for heart-rate-based sleep staging: the
+  // wrn-gru-mesa model was trained with age (years) and sex as inputs.
+  age: integer('age'),
+  sex: text('sex', { enum: ['female', 'male'] }),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),

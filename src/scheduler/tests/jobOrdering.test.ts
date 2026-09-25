@@ -190,6 +190,8 @@ function resetSchema(): void {
       auto_off_minutes INTEGER NOT NULL DEFAULT 30,
       away_start TEXT,
       away_return TEXT,
+      age INTEGER,
+      sex TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );

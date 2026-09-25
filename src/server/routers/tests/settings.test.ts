@@ -502,6 +502,38 @@ describe('settings.updateSide', () => {
     dbState.txRowsQueue.push([])
     await expect(caller.updateSide({ side: 'left', name: 'New' })).rejects.toThrow(/Side settings for left not found/)
   })
+
+  describe('sleeper profile (age, sex)', () => {
+    const current = {
+      side: 'left', name: 'L', awayMode: false, alwaysOn: false, autoOffEnabled: false, autoOffMinutes: 30,
+      awayStart: null, awayReturn: null, age: null, sex: null, createdAt: new Date(0), updatedAt: new Date(0),
+    }
+
+    it('persists age and sex and returns them', async () => {
+      dbState.txRowsQueue.push([current], [{ ...current, age: 41, sex: 'female' }])
+      const out = await caller.updateSide({ side: 'left', age: 41, sex: 'female' })
+      expect(dbState.txSetCalls[0]).toMatchObject({ age: 41, sex: 'female' })
+      expect(out).toMatchObject({ age: 41, sex: 'female' })
+      // A profile edit is not a schedule/keepalive/auto-off change.
+      expect(schedulerMock.jm.upsertAwayMode).not.toHaveBeenCalled()
+      expect(keepaliveMock.startKeepalive).not.toHaveBeenCalled()
+      expect(autoOffMock.restartAutoOffTimers).not.toHaveBeenCalled()
+    })
+
+    it('clears them with null', async () => {
+      dbState.txRowsQueue.push([{ ...current, age: 41, sex: 'male' }], [current])
+      await caller.updateSide({ side: 'left', age: null, sex: null })
+      expect(dbState.txSetCalls[0]).toMatchObject({ age: null, sex: null })
+    })
+
+    it.each([0, 121, 30.5, -3])('rejects age %s', async (age) => {
+      await expect(caller.updateSide({ side: 'left', age })).rejects.toThrow()
+    })
+
+    it('rejects an unknown sex value', async () => {
+      await expect(caller.updateSide({ side: 'left', sex: 'other' as 'female' })).rejects.toThrow()
+    })
+  })
 })
 
 describe('settings.setAlwaysOn', () => {
