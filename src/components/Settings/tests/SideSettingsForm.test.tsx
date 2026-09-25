@@ -1,6 +1,6 @@
 /**
  * SideSettingsForm — always-on / auto-off mutual exclusion, the presence
- * gate on enabling auto-off, and name commit-on-blur.
+ * gate on enabling auto-off, name commit-on-blur, and the sleeper profile.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -94,5 +94,63 @@ describe('SideSettingsForm', () => {
     render(<SideSettingsForm side="left" sideData={base} presenceAvailable />)
     fireEvent.click(screen.getByLabelText('Toggle away mode for Left side'))
     expect(trpcMock.mutate).toHaveBeenCalledWith({ side: 'left', awayMode: true })
+  })
+})
+
+describe('SideSettingsForm sleeper profile', () => {
+  function renderForm(extra: Partial<{ age: number | null, sex: 'female' | 'male' | null }> = {}) {
+    return render(<SideSettingsForm side="left" sideData={{ ...base, ...extra }} presenceAvailable />)
+  }
+
+  it('shows stored age and sex', () => {
+    renderForm({ age: 38, sex: 'male' })
+    expect((screen.getByLabelText('Age') as HTMLInputElement).value).toBe('38')
+    expect(screen.getByRole('tab', { name: 'Male' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('shows Not set when sex is unset', () => {
+    renderForm()
+    expect(screen.getByRole('tab', { name: 'Not set' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('saves a valid age on blur', () => {
+    renderForm()
+    const input = screen.getByLabelText('Age')
+    fireEvent.change(input, { target: { value: '41' } })
+    fireEvent.blur(input)
+    expect(trpcMock.mutate).toHaveBeenCalledWith({ side: 'left', age: 41 })
+  })
+
+  it('clears age when emptied', () => {
+    renderForm({ age: 41 })
+    const input = screen.getByLabelText('Age')
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.blur(input)
+    expect(trpcMock.mutate).toHaveBeenCalledWith({ side: 'left', age: null })
+  })
+
+  it.each(['0', '121', '30.5'])('reverts invalid age %s without saving', (value) => {
+    renderForm({ age: 41 })
+    const input = screen.getByLabelText('Age') as HTMLInputElement
+    fireEvent.change(input, { target: { value } })
+    fireEvent.blur(input)
+    expect(trpcMock.mutate).not.toHaveBeenCalled()
+    expect(input.value).toBe('41')
+  })
+
+  it('does not save an unchanged age', () => {
+    renderForm({ age: 41 })
+    fireEvent.blur(screen.getByLabelText('Age'))
+    expect(trpcMock.mutate).not.toHaveBeenCalled()
+  })
+
+  it('saves sex, including clearing it', () => {
+    renderForm({ sex: 'female' })
+    fireEvent.click(screen.getByRole('tab', { name: 'Male' }))
+    expect(trpcMock.mutate).toHaveBeenLastCalledWith({ side: 'left', sex: 'male' })
+    fireEvent.click(screen.getByRole('tab', { name: 'Not set' }))
+    expect(trpcMock.mutate).toHaveBeenLastCalledWith({ side: 'left', sex: null })
+    fireEvent.click(screen.getByRole('tab', { name: 'Not set' }))
+    expect(trpcMock.mutate).toHaveBeenCalledTimes(2) // re-selecting is a no-op
   })
 })
