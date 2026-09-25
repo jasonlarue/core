@@ -46,6 +46,7 @@ import cbor2
 from common.nats_follower import create_follower
 from common.dialect import KNOWN_RECORD_TYPES, warn_unknown_type_once
 from common.side_mode import SingleSleeperMode
+from beats import BeatHistory, BeatTracker, Chunk
 import numpy as np
 from scipy.signal import butter, sosfiltfilt, hilbert, find_peaks
 
@@ -287,6 +288,67 @@ class SingleSleeperVitals:
             return True
         self._pending_at = self._clock()
         return False
+
+
+def write_heartbeats(holder: "DBHolder", side: str, chunk: Chunk) -> bool:
+    """Insert one minute of detected beats. Replays after a restart produce
+    the same rows again, so conflicts are ignored."""
+    try:
+        with holder.conn:
+            holder.conn.execute(
+                "INSERT OR IGNORE INTO heartbeats (side, timestamp, beats, quality) "
+                "VALUES (?, ?, ?, ?)",
+                (side, int(chunk.start), json.dumps(chunk.beats), round(chunk.quality, 3)),
+            )
+        return True
+    except sqlite3.Error as e:
+        log.warning("write_heartbeats failed: %s", e)
+        return False
+
+
+class BeatFront:
+    """Beat detection for both sides. Each side's tracker gets its own two
+    piezo channels plus the other side's as the noise reference. Finished
+    minutes go to the heartbeats table; with one side in away mode (single
+    sleeper), each minute keeps whichever side saw the sleeper's beats best,
+    stored under the home side."""
+
+    def __init__(self, holder: "DBHolder", mode: SingleSleeperMode):
+        self._holder = holder
+        self._mode = mode
+        self.trackers = {"left": BeatTracker("left"), "right": BeatTracker("right")}
+
+    def history(self, side: str) -> BeatHistory:
+        return self.trackers[side].history
+
+    def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
+             r1: np.ndarray, r2: Optional[np.ndarray]) -> None:
+        self.trackers["left"].push(ts, l1, l2, r1, r2)
+        self.trackers["right"].push(ts, r1, r2, l1, l2)
+        self._write({s: t.take_chunks() for s, t in self.trackers.items()})
+
+    def gap(self) -> None:
+        for t in self.trackers.values():
+            t.gap()
+
+    def flush(self) -> None:
+        self._write({s: t.take_chunks(flush_before=float("inf"))
+                     for s, t in self.trackers.items()})
+
+    def _write(self, chunks: dict) -> None:
+        home = self._mode.home_side()
+        if home is None:
+            for side, cs in chunks.items():
+                for c in cs:
+                    write_heartbeats(self._holder, side, c)
+            return
+        by_start: dict = {}
+        for cs in chunks.values():
+            for c in cs:
+                by_start.setdefault(c.start, []).append(c)
+        for start in sorted(by_start):
+            best = max(by_start[start], key=lambda c: c.coverage * c.quality)
+            write_heartbeats(self._holder, home, best)
 
 
 def report_health(status: str, message: str) -> None:
@@ -1066,8 +1128,10 @@ def main() -> None:
     right._other = left
     # One side in away mode: a single sleeper — the away side's readings
     # (rolled over, leg across) are merged into the home side's series.
-    vitals_router = SingleSleeperVitals(db_holder, SingleSleeperMode(SLEEPYPOD_DB))
+    bed_mode = SingleSleeperMode(SLEEPYPOD_DB)
+    vitals_router = SingleSleeperVitals(db_holder, bed_mode)
     left.sink = right.sink = vitals_router.submit
+    beat_front = BeatFront(db_holder, bed_mode)
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)
@@ -1104,8 +1168,17 @@ def main() -> None:
 
             # Pump gating — drop entire record if pump detected or guard active
             if pump_gate.check(l_samples, r_samples):
+                beat_front.gap()
                 continue
 
+            # Beat detection uses both piezo channels of each side, and the
+            # other side as a noise reference.
+            ts = record.get("ts")
+            beat_front.push(
+                float(ts) if isinstance(ts, (int, float)) else time.time(),
+                l_samples, _int32_samples(record.get("left2", b"")),
+                r_samples, _int32_samples(record.get("right2", b"")),
+            )
             left.ingest(l_samples)
             right.ingest(r_samples)
             vitals_router.tick()
@@ -1115,6 +1188,7 @@ def main() -> None:
         report_health("down", str(e))
         sys.exit(1)
     finally:
+        beat_front.flush()
         vitals_router.flush()
         db_holder.conn.close()
         log.info("Shutdown complete")

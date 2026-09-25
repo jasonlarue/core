@@ -1477,3 +1477,77 @@ class TestSingleSleeperVitalsRetry:
         assert router.submit(t._cand("right", 59.0, 0.6, minute=1)) is False
         assert router.submit(t._cand("right", 59.0, 0.6, minute=1)) is True
         assert t._rows(conn) == [("left", 58.0, 0.6)]
+
+
+# ===================================================================
+# Beat detection wiring
+# ===================================================================
+
+
+def _hb_db():
+    import sqlite3
+    import main
+    conn = TestWriteVitalsResilience()._make_db()
+    conn.execute(
+        """CREATE TABLE heartbeats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, side TEXT, timestamp INTEGER,
+            beats TEXT, quality REAL, UNIQUE(side, timestamp))"""
+    )
+    return conn, main.DBHolder(conn)
+
+
+def _hb_rows(conn):
+    import json
+    return [(side, ts, json.loads(beats), q) for side, ts, beats, q in conn.execute(
+        "SELECT side, timestamp, beats, quality FROM heartbeats ORDER BY side, timestamp")]
+
+
+class TestHeartbeatStorage:
+    def test_write_and_ignore_replayed_minute(self):
+        import main
+        from beats import Chunk
+        conn, holder = _hb_db()
+        chunk = Chunk(1_790_000_040, [120, 1110, None, 3050], 0.8766)
+        assert main.write_heartbeats(holder, "left", chunk) is True
+        assert main.write_heartbeats(holder, "left", chunk) is True  # restart replay
+        assert _hb_rows(conn) == [("left", 1_790_000_040, [120, 1110, None, 3050], 0.877)]
+
+    def test_missing_table_is_reported_not_raised(self):
+        import main
+        from beats import Chunk
+        conn = TestWriteVitalsResilience()._make_db()
+        assert main.write_heartbeats(main.DBHolder(conn), "left", Chunk(60, [1], 0.5)) is False
+
+
+class TestBeatFrontRouting:
+    def _front(self, home):
+        import main
+        conn, holder = _hb_db()
+        return main.BeatFront(holder, _Mode(home)), conn
+
+    def test_per_side_writes_each_side(self):
+        from beats import Chunk
+        front, conn = self._front(None)
+        front._write({"left": [Chunk(60, [0, 1000], 0.9)], "right": [Chunk(60, [5, 1005], 0.7)]})
+        assert [(r[0], r[1]) for r in _hb_rows(conn)] == [("left", 60), ("right", 60)]
+
+    def test_single_sleeper_keeps_the_better_side_under_home(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        # Rolled onto the right: its chunk has more beats this minute.
+        front._write({"left": [Chunk(60, [0, None, 3000], 0.6)],
+                      "right": [Chunk(60, [0, 1000, 2000, 3000], 0.9)]})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000, 2000, 3000], 0.9)]
+
+    def test_both_trackers_get_the_other_side_as_reference(self):
+        import numpy as np
+        front, _ = self._front(None)
+        calls = {}
+        for side, tr in front.trackers.items():
+            tr.push = (lambda s: lambda ts, o1, o2, r1, r2: calls.setdefault(s, (o1, r1)))(side)
+            tr.take_chunks = lambda *a, **k: []
+        l1, r1 = np.full(5, 1), np.full(5, 2)
+        front.push(0.0, l1, None, r1, None)
+        assert calls["left"][0] is l1 and calls["left"][1] is r1
+        assert calls["right"][0] is r1 and calls["right"][1] is l1
+
