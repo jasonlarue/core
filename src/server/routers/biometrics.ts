@@ -2,8 +2,9 @@ import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
 import { publicProcedure, router } from '@/src/server/trpc'
 import { biometricsDb, db } from '@/src/db'
-import { sleepRecords, vitals, movement } from '@/src/db/biometrics-schema'
-import { deviceSettings } from '@/src/db/schema'
+import { sleepRecords, vitals, movement, heartbeats } from '@/src/db/biometrics-schema'
+import { deviceSettings, sideSettings } from '@/src/db/schema'
+import { stageNight } from '@/src/lib/sleepStaging/stageNight'
 import { eq, and, gte, lte, desc, asc, avg, min, max, count, sql } from 'drizzle-orm'
 import { sideSchema, idSchema, validateDateRange } from '@/src/server/validation-schemas'
 import { listRawFiles } from './raw'
@@ -969,7 +970,10 @@ export const biometricsRouter = router({
    * Performs server-side sleep stage classification by:
    * 1. Fetching the sleep record (if sleepRecordId provided) or using date range
    * 2. Querying vitals + movement data within that window
-   * 3. Running the rule-based classifier (ported from iOS SleepAnalyzer)
+   * 3. Staging with the heart-rhythm model (SleepECG wrn-gru-mesa on detected
+   *    heartbeats, plus deep-sleep rules) when the sleeper profile is set and
+   *    the window has enough heartbeats; otherwise the rule-based classifier
+   *    (ported from iOS SleepAnalyzer)
    * 4. Returning epochs, merged blocks, distribution, and quality score
    *
    * @param side - Which side to classify
@@ -1016,6 +1020,8 @@ export const biometricsRouter = router({
       sleepRecordId: z.number().nullable(),
       enteredBedAt: z.number().nullable(),
       leftBedAt: z.number().nullable(),
+      method: z.enum(['model', 'rules']).optional(),
+      fallbackReason: z.enum(['profile', 'coverage']).nullable().optional(),
     }))
     .query(async ({ input }): Promise<SleepStagesResult> => {
       try {
@@ -1178,8 +1184,40 @@ export const biometricsRouter = router({
           )
           .orderBy(asc(movement.timestamp))
 
-        // Classify stages
-        const epochs = classifySleepStages(vitalsData, movementData)
+        // Heart-rhythm model first; the rule-based stager covers nights it
+        // can't score (profile unset, too few heartbeats).
+        const [heartbeatRows, [profile], [device]] = await Promise.all([
+          biometricsDb
+            .select()
+            .from(heartbeats)
+            .where(
+              and(
+                eq(heartbeats.side, input.side),
+                gte(heartbeats.timestamp, new Date(windowStart.getTime() - 60_000)),
+                lte(heartbeats.timestamp, windowEnd)
+              )
+            )
+            .orderBy(asc(heartbeats.timestamp)),
+          db.select({ age: sideSettings.age, sex: sideSettings.sex })
+            .from(sideSettings)
+            .where(eq(sideSettings.side, input.side))
+            .limit(1),
+          db.select({ timezone: deviceSettings.timezone }).from(deviceSettings).limit(1),
+        ])
+        const staged = stageNight({
+          chunks: heartbeatRows.map(r => ({ timestamp: r.timestamp, beats: r.beats as Array<number | null> })),
+          windowStart,
+          windowEnd,
+          timezone: device?.timezone ?? 'America/Los_Angeles',
+          age: profile?.age ?? null,
+          sex: profile?.sex ?? null,
+          movement: movementData,
+          vitals: vitalsData,
+        })
+        const epochs = staged.ok ? staged.epochs : classifySleepStages(vitalsData, movementData)
+
+        const method = staged.ok ? 'model' as const : 'rules' as const
+        const fallbackReason = staged.ok ? null : staged.reason
 
         if (epochs.length === 0) {
           return {
@@ -1191,6 +1229,8 @@ export const biometricsRouter = router({
             sleepRecordId,
             enteredBedAt,
             leftBedAt,
+            method,
+            fallbackReason,
           }
         }
 
@@ -1208,6 +1248,8 @@ export const biometricsRouter = router({
           sleepRecordId,
           enteredBedAt,
           leftBedAt,
+          method,
+          fallbackReason,
         }
       }
       catch (error) {

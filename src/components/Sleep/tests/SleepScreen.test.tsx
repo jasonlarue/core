@@ -116,6 +116,21 @@ describe('SleepScreen night view', () => {
     expect((screen.getByRole('button', { name: /^Sun, Sep 20/ }) as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it.each([
+    [{ method: 'model', fallbackReason: null }, 'Stages from heart rhythm'],
+    [{ method: 'rules', fallbackReason: 'profile' }, 'Set age and sex in Settings → Sides → Sleeper profile for heart-rhythm stages'],
+    [{ method: 'rules', fallbackReason: 'coverage' }, 'Not enough heartbeat data this night — stages are a rough estimate from movement'],
+  ])('says how the night was staged (%o)', (staging, note) => {
+    state.stages.mockImplementation(() => ({ data: { ...stagesFor(at(22, 23, 20), 12), ...staging }, isLoading: false }))
+    render(<SleepScreen />)
+    expect(screen.getByText(note)).toBeTruthy()
+  })
+
+  it('shows no staging note when the server does not say how it staged', () => {
+    render(<SleepScreen />)
+    expect(screen.queryByText(/heart rhythm|heartbeat data/)).toBeNull()
+  })
+
   it('falls back to the server latest night when the current week is empty', () => {
     state.sleep.mockReturnValue({ data: [], isLoading: false })
     render(<SleepScreen />)
