@@ -24,7 +24,7 @@ const dbState = vi.hoisted(() => ({
   havingArgs: [] as unknown[],
   insertValues: [] as unknown[],
   txSetValues: [] as unknown[],
-  settingsRows: [{ timezone: 'America/Los_Angeles' }] as { timezone: string | null }[],
+  settingsRows: [{ timezone: 'America/Los_Angeles' }] as Array<{ timezone: string | null, age?: number | null, sex?: string | null }>,
   popRows(): unknown[] { return dbState.rowsQueue.shift() ?? [] },
   popTx(): unknown[] { return dbState.txRowsQueue.shift() ?? [] },
 }))
@@ -95,6 +95,7 @@ const topDbMock = vi.hoisted(() => {
     const chain: Record<string, unknown> = {}
     chain.then = (resolve: (v: unknown) => unknown) => Promise.resolve(dbState.settingsRows).then(resolve)
     chain.from = vi.fn(() => chain)
+    chain.where = vi.fn(() => chain)
     chain.limit = vi.fn(() => chain)
     return chain
   }
@@ -119,6 +120,16 @@ vi.mock('@/src/db', () => ({
 
 vi.mock('@/src/server/routers/raw', () => rawMock)
 vi.mock('@/src/lib/sleep-stages', () => sleepStagesMock)
+
+// The heart-rhythm pipeline has its own tests (src/lib/sleepStaging); here
+// only the router's choice between it and the rule-based stager matters.
+const stageNightMock = vi.hoisted(() => ({
+  stageNight: vi.fn<(input: unknown) =>
+    { ok: true, epochs: unknown[], coverage: number } | { ok: false, reason: 'profile' | 'coverage' }>(
+    () => ({ ok: false, reason: 'profile' }),
+  ),
+}))
+vi.mock('@/src/lib/sleepStaging/stageNight', () => stageNightMock)
 
 const occupancyMock = vi.hoisted(() => ({
   getOccupancy: vi.fn<(side: 'left' | 'right') => {
@@ -184,6 +195,7 @@ beforeEach(() => {
   topDbMock.select.mockClear()
   rawMock.listRawFiles.mockReset().mockResolvedValue([])
   sleepStagesMock.classifySleepStages.mockReset().mockReturnValue([])
+  stageNightMock.stageNight.mockReset().mockReturnValue({ ok: false, reason: 'profile' })
   sleepStagesMock.mergeIntoBlocks.mockReset().mockReturnValue([])
   sleepStagesMock.calculateDistribution.mockReset().mockReturnValue({ wake: 0, light: 0, deep: 0, rem: 0 })
   sleepStagesMock.calculateQualityScore.mockReset().mockReturnValue(0)
@@ -587,6 +599,51 @@ describe('biometrics.getSleepStages', () => {
     expect(out.epochs).toHaveLength(1)
     expect(out.qualityScore).toBe(80)
     expect(out.totalSleepMs).toBe(300_000)
+  })
+
+  it('uses the heart-rhythm model when it can stage the night', async () => {
+    const record = {
+      id: 3, side: 'left',
+      enteredBedAt: new Date('2025-01-01T22:00:00Z'),
+      leftBedAt: new Date('2025-01-02T06:00:00Z'),
+    }
+    const chunkRow = { id: 9, side: 'left', timestamp: new Date('2025-01-01T22:01:00Z'), beats: [120, 1110, null, 3050], quality: 0.9 }
+    dbState.rowsQueue.push([record], [], [], [chunkRow])
+    dbState.settingsRows = [{ timezone: 'America/New_York', age: 45, sex: 'male' }]
+    const modelEpochs = [{ start: 0, duration: 30_000, stage: 'deep', heartRate: 54, hrv: 48, breathingRate: 13, movement: 0 }]
+    stageNightMock.stageNight.mockReturnValueOnce({ ok: true, epochs: modelEpochs, coverage: 0.9 })
+
+    const out = await caller.getSleepStages({ side: 'left', sleepRecordId: 3 })
+
+    expect(out.method).toBe('model')
+    expect(out.fallbackReason).toBeNull()
+    expect(sleepStagesMock.classifySleepStages).not.toHaveBeenCalled()
+    expect(sleepStagesMock.mergeIntoBlocks).toHaveBeenCalledWith(modelEpochs)
+    const input = stageNightMock.stageNight.mock.calls[0][0] as Record<string, unknown>
+    expect(input).toMatchObject({
+      windowStart: record.enteredBedAt,
+      windowEnd: record.leftBedAt,
+      timezone: 'America/New_York',
+      age: 45,
+      sex: 'male',
+      chunks: [{ timestamp: chunkRow.timestamp, beats: chunkRow.beats }],
+    })
+  })
+
+  it.each(['profile', 'coverage'] as const)('falls back to the rules and says why (%s)', async (reason) => {
+    const record = {
+      id: 4, side: 'left',
+      enteredBedAt: new Date('2025-01-01T22:00:00Z'),
+      leftBedAt: new Date('2025-01-02T06:00:00Z'),
+    }
+    dbState.rowsQueue.push([record], [], [], [])
+    stageNightMock.stageNight.mockReturnValueOnce({ ok: false, reason })
+
+    const out = await caller.getSleepStages({ side: 'left', sleepRecordId: 4 })
+
+    expect(out.method).toBe('rules')
+    expect(out.fallbackReason).toBe(reason)
+    expect(sleepStagesMock.classifySleepStages).toHaveBeenCalled()
   })
 
   it('rejects an inverted custom date range', async () => {
@@ -1576,6 +1633,8 @@ describe('biometrics.getSleepStages query window', () => {
       sleepRecordId: 3,
       enteredBedAt: record.enteredBedAt.getTime(),
       leftBedAt: record.leftBedAt.getTime(),
+      method: 'rules',
+      fallbackReason: 'profile',
     })
     expect(sleepStagesMock.mergeIntoBlocks).not.toHaveBeenCalled()
   })
