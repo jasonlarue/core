@@ -192,6 +192,24 @@ When exactly one side is in away mode, both sides' vitals go through `SingleSlee
 
 Pending single-sleeper rows expire on the reader thread even when RAW/NATS input is idle or pump gating skips records. A failed write retains the completed interval separately from candidates awaiting a partner; it must commit before another candidate is accepted, so later intervals cannot replace it. Pending rows remain in memory and do not survive a process crash.
 
+## 5a. Beat-to-Beat Detection (`beats.py`)
+
+Individual heartbeat times — what HRV and heart-rate-based sleep staging need — detected per side on a 20 s window advancing 5 s; only beats in the central 5 s are committed, so every beat is decided with context on both sides (~12.5 s latency).
+
+| Step | What it does |
+|---|---|
+| Band-pass + decimate | Each piezo channel to the cardiac band (0.8–8.5 Hz, as the rate pipeline), 500 → 100 Hz |
+| Motion blanking | Samples above 3× the typical heartbeat peak (median of per-1.5 s block maxima, so it tracks J-peak height at any heart rate) are zeroed with a 0.5 s margin; no beat is taken within 0.3 s, and a break is recorded, so no interval spans a turn-over |
+| Other-side noise reference | Ridge least-squares FIR (±50 ms) from the other side's two channels, subtracted. Removes vibration common to both sides (pump beat frequencies, building, a partner's coupled heartbeat). The other side can also carry *this* sleeper's heartbeat; subtracting it collapses cardiac periodicity (measured ~0.83 → 0.1–0.26), so the cleaned channel is used unless periodicity drops by more than 0.10 |
+| Two channels | `left1`/`left2` (and right): normalised, the second aligned to the first (lag ±100 ms, polarity), weighted by periodicity²; the combination is used only if it beats the better single channel |
+| Template matching | The window's median beat complex is matched against the signal (normalised cross-correlation); peaks ≥ 0.4 at ≥ 0.6 period spacing are beats, gaps > 1.6 periods are searched again at 0.25, positions refined parabolically. With two good channels, a beat neither channel shows (same template) is dropped |
+| Anchor continuity | A beat's time is a fixed point of the complex (J peak or K trough, ~80 ms apart, depending on polarity). Each window's template is aligned to the previous one and beat times shifted accordingly, so a night keeps one anchor — a switch would put one bad interval per switch into RMSSD |
+| Artifact correction | Intervals > 20% from the median of the last 11 are rejected (classic HRV editing criterion); an extra beat whose two short intervals sum to a normal one is removed; missed beats and ectopy become breaks, never interpolated beats (classification after Lipponen & Tarvainen 2019). Three mutually consistent outliers mean a real rate change and reset the history — unless the new rate is ~½× or ~2× (a detection artifact) |
+
+Output: one `heartbeats` row per side per minute — beat times as ms offsets, `null` for a break. In single-sleeper mode each minute keeps the side that saw the sleeper's beats best, stored under the home side.
+
+Validated on synthetic ballistocardiograms with known beat times (`test_beats.py`): ≥ 97% sensitivity, ≥ 99% PPV and < 5 ms RMS timing error on clean signals; 45–100 bpm; a noisy channel rescued by an inverted, delayed second channel; in-band common vibration removed via the other side; the sleeper's own heartbeat on the other side not cancelled; a movement burst leaving no false interval; RMSSD within 12% of ground truth. Cost: ~0.1% of one Apple-silicon core per side (estimate ~1–1.5% on the pod's Cortex-A53).
+
 ## 6. Heart Rate Extraction
 
 ### Bandpass: 0.8-8.5 Hz
