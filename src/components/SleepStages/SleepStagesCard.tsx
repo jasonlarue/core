@@ -379,6 +379,7 @@ export function SleepStagesCard({ side, defaultTimeRange = 'night', hideTimeRang
                       {formatNightDate(new Date(stagesData.enteredBedAt))}
                     </p>
                   )}
+                  <StagingMethodNote method={stagesData.method} reason={stagesData.fallbackReason} />
                 </>
               )
             : (
@@ -489,4 +490,18 @@ export function SleepStagesCard({ side, defaultTimeRange = 'night', hideTimeRang
       )}
     </div>
   )
+}
+
+/** How this night was staged, and what would enable the heart-rhythm model. */
+function StagingMethodNote({ method, reason }: {
+  method?: 'model' | 'rules'
+  reason?: 'profile' | 'coverage' | null
+}) {
+  if (!method) return null
+  const text = method === 'model'
+    ? 'Stages from heart rhythm'
+    : reason === 'profile'
+      ? 'Set age and sex in Settings → Sleeper profile for heart-rhythm stages'
+      : 'Not enough heartbeat data this night — stages are a rough estimate from movement'
+  return <p className="text-center text-[11px] text-zinc-600">{text}</p>
 }

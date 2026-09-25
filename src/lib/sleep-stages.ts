@@ -43,6 +43,12 @@ export interface SleepStagesResult {
   sleepRecordId: number | null
   enteredBedAt: number | null // unix ms
   leftBedAt: number | null // unix ms
+  /** 'model': SleepECG wrn-gru-mesa on detected heartbeats + deep-sleep
+   *  rules (src/lib/sleepStaging). 'rules': the rule-based fallback below. */
+  method?: 'model' | 'rules'
+  /** Why the fallback ran: sleeper profile (age/sex) unset, or too little
+   *  heartbeat data in the window. */
+  fallbackReason?: 'profile' | 'coverage' | null
 }
 
 interface VitalsRow {
