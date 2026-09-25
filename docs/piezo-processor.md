@@ -206,6 +206,8 @@ Individual heartbeat times — what HRV and heart-rate-based sleep staging need 
 
 Output: one `heartbeats` row per side per minute — beat times as ms offsets, `null` for a break. In single-sleeper mode each minute keeps the side that saw the sleeper's beats best, stored under the home side.
 
+Vitals: when the latest committed beat is < 45 s old, `heart_rate` comes from the last minute of clean intervals and `hrv` is RMSSD over the last 5 minutes (Task Force of the ESC/NASPE 1996 short-term standard; ≥ 50% of the window covered, ≥ 20 successive differences, never across a break). Rows using them carry the `beat_hr` / `beat_hrv` quality flags; otherwise the window estimates below are used as before.
+
 Validated on synthetic ballistocardiograms with known beat times (`test_beats.py`): ≥ 97% sensitivity, ≥ 99% PPV and < 5 ms RMS timing error on clean signals; 45–100 bpm; a noisy channel rescued by an inverted, delayed second channel; in-band common vibration removed via the other side; the sleeper's own heartbeat on the other side not cancelled; a movement burst leaving no false interval; RMSSD within 12% of ground truth. Cost: ~0.1% of one Apple-silicon core per side (estimate ~1–1.5% on the pod's Cortex-A53).
 
 ## 6. Heart Rate Extraction

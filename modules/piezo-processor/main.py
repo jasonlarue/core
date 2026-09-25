@@ -83,6 +83,13 @@ PUMP_COUPLING_ACR_THRESHOLD = 0.6 # require strong autocorr to enter
 # HR band: 0.8 Hz preserves fundamental of 48+ BPM; 8.5 Hz per PMC7582983
 HR_BAND = (0.8, 8.5)
 
+# Beat-to-beat vitals (beats.py) replace the window estimates when the latest
+# committed beat is this recent — beats commit ~12.5 s behind real time, and
+# a restart's replay of old RAW data must not report stale values as current.
+BEAT_FRESH_S = 45.0
+# Vitals-quality confidence credited to a beat-derived heart rate.
+BEAT_HR_CONFIDENCE = 0.8
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -976,6 +983,18 @@ class SideProcessor:
         # Where computed vitals go; None writes them under this side.
         # main() routes both sides through SingleSleeperVitals.submit.
         self.sink: Optional[Callable[[VitalsCandidate], bool]] = None
+        # Cleaned beat-to-beat history (beats.py); main() wires it in.
+        self.beats: Optional[BeatHistory] = None
+
+    def _beat_vitals(self) -> tuple:
+        """(heart_rate, rmssd_ms) from detected beats, each None when the
+        history is stale or doesn't cover enough of its window."""
+        if self.beats is None:
+            return None, None
+        latest = self.beats.latest_time()
+        if latest is None or time.time() - latest > BEAT_FRESH_S:
+            return None, None
+        return self.beats.heart_rate(), self.beats.rmssd_ms()
 
     def ingest(self, samples: np.ndarray) -> None:
         self._hr_buf.extend(samples)
@@ -1066,6 +1085,15 @@ class SideProcessor:
         hrv = compute_hrv(hrv_arr) if len(hrv_arr) >= int(
             HRV_WINDOW_S * SAMPLE_RATE) else None
 
+        # Beat-to-beat values win when available: HR from the last minute
+        # of clean intervals, HRV as 5-minute RMSSD (Task Force 1996).
+        beat_hr, beat_hrv = self._beat_vitals()
+        if beat_hr is not None:
+            hr = beat_hr
+            hr_score = max(hr_score, BEAT_HR_CONFIDENCE)
+        if beat_hrv is not None:
+            hrv = beat_hrv
+
         if hr is not None or hrv is not None or br is not None:
             ts = datetime.now(timezone.utc)
             snr = max(0.0, min(1.0, acr_qual))
@@ -1080,6 +1108,10 @@ class SideProcessor:
                 flags.append("no_br")
             if med_std < self._presence.enter_threshold:
                 flags.append("low_signal")
+            if beat_hr is not None:
+                flags.append("beat_hr")
+            if beat_hrv is not None:
+                flags.append("beat_hrv")
             cand = VitalsCandidate(self.side, ts, hr, hrv, br, quality, flags or None, hr_raw)
             wrote = self.sink(cand) if self.sink is not None else cand.write(self.db_holder)
             log.info("vitals %s — HR=%.1f HRV=%.1f BR=%.1f q=%.2f", self.side,
@@ -1132,6 +1164,8 @@ def main() -> None:
     vitals_router = SingleSleeperVitals(db_holder, bed_mode)
     left.sink = right.sink = vitals_router.submit
     beat_front = BeatFront(db_holder, bed_mode)
+    left.beats = beat_front.history("left")
+    right.beats = beat_front.history("right")
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)

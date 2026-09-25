@@ -1551,3 +1551,34 @@ class TestBeatFrontRouting:
         assert calls["left"][0] is l1 and calls["left"][1] is r1
         assert calls["right"][0] is r1 and calls["right"][1] is l1
 
+
+class TestBeatVitals:
+    def _proc_with_history(self, age_s):
+        import main
+        from beats import BeatHistory
+        proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
+        h = BeatHistory()
+        now = time.time()
+        # 6 minutes of beats at 1.0 s with alternating +-20 ms (RMSSD 40 ms).
+        t = now - age_s - 360
+        items = []
+        for i in range(360):
+            items.append((t, 1.0))
+            t += 1.0 + (0.02 if i % 2 else -0.02)
+        h.extend(items)
+        proc.beats = h
+        return proc
+
+    def test_fresh_beats_supply_hr_and_rmssd(self):
+        hr, rmssd = self._proc_with_history(age_s=5)._beat_vitals()
+        assert hr == pytest.approx(60, abs=0.5)
+        assert rmssd == pytest.approx(40, abs=1)
+
+    def test_stale_beats_are_ignored(self):
+        import main
+        assert self._proc_with_history(age_s=main.BEAT_FRESH_S + 10)._beat_vitals() == (None, None)
+
+    def test_no_history_means_no_beat_values(self):
+        import main
+        proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
+        assert proc._beat_vitals() == (None, None)
