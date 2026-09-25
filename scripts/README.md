@@ -226,7 +226,7 @@ systemctl disable sleepypod
 
 ## SSH Access
 
-During installation, you'll be prompted to configure SSH on port 8822 with keys-only authentication.
+During installation, you'll be prompted to configure SSH on port 8822 with keys-only authentication — including when the installer is piped in with `curl … | sudo bash`. Runs with no terminal at all (e.g. `ssh pod 'bash install'`) skip the prompt; pass `--ssh-key "ssh-ed25519 AAAA… you@host"` to configure SSH without one.
 
 If you need to configure SSH later:
 1. Edit `/etc/ssh/sshd_config`
