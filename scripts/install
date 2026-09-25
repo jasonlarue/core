@@ -1837,17 +1837,25 @@ if [ "${SKIP_SSH:-}" != true ] && [ -t 0 ] && [[ "${SETUP_SSH:-}" =~ ^[Yy]$ ]]; 
     esac
   fi
 
-  # Only disable password auth once root has a key sshd can actually read.
-  # Hardening without one is an unrecoverable lockout — port 8822 is the
-  # pod's only remote entry point, and getting back in means opening the
-  # case for a serial console.
-  if [ "$SSH_KEY_INSTALLED" = true ]; then
+  # Only disable password auth once root has a key sshd can actually read,
+  # and sshd's AllowUsers/DenyUsers rules let root log in at all. Hardening
+  # without both is an unrecoverable lockout — port 8822 is the pod's only
+  # remote entry point, and getting back in means opening the case for a
+  # serial console.
+  SSH_HARDEN=false
+  if [ "$SSH_KEY_INSTALLED" != true ]; then
+    echo "No SSH key installed — leaving password authentication as-is." >&2
+    echo "Re-run the installer with a valid public key to harden sshd." >&2
+  elif ensure_sshd_allows_user root; then
+    SSH_HARDEN=true
+  else
+    echo "sshd's user access rules would refuse root — leaving password authentication as-is." >&2
+  fi
+
+  if [ "$SSH_HARDEN" = true ]; then
     set_sshd_directive PermitRootLogin prohibit-password
     set_sshd_directive PasswordAuthentication no
     set_sshd_directive PermitEmptyPasswords no
-  else
-    echo "No SSH key installed — leaving password authentication as-is." >&2
-    echo "Re-run the installer with a valid public key to harden sshd." >&2
   fi
 
   # Validate SSH config before restarting
@@ -1866,7 +1874,7 @@ if [ "${SKIP_SSH:-}" != true ] && [ -t 0 ] && [[ "${SETUP_SSH:-}" =~ ^[Yy]$ ]]; 
   # re-enabled password auth for exactly the account being hardened. Port
   # can't appear in a Match block, so it stays global.
   SSH_EXPECTED="port=8822"
-  if [ "$SSH_KEY_INSTALLED" = true ]; then
+  if [ "$SSH_HARDEN" = true ]; then
     SSH_EXPECTED="$SSH_EXPECTED root:permitrootlogin=prohibit-password"
     SSH_EXPECTED="$SSH_EXPECTED root:passwordauthentication=no root:permitemptypasswords=no"
   fi
@@ -1886,16 +1894,20 @@ if [ "${SKIP_SSH:-}" != true ] && [ -t 0 ] && [[ "${SETUP_SSH:-}" =~ ^[Yy]$ ]]; 
     fi
   done
 
-  if [ "$SSH_KEY_INSTALLED" = true ]; then
+  if [ "$SSH_HARDEN" = true ] && ! sshd_allows_user root; then
+    echo "Error: sshd's user access rules refuse root after the edit." >&2
+    echo "Restoring backup and leaving sshd untouched..." >&2
+    cp /etc/ssh/sshd_config.pre-install /etc/ssh/sshd_config
+    exit 1
+  fi
+
+  if [ "$SSH_HARDEN" = true ]; then
     SSH_RESULT="SSH configured on port 8822 (keys only)"
   else
     SSH_RESULT="SSH configured on port 8822 (existing auth methods unchanged)"
   fi
 
-  # Restart SSH (try both service names for compatibility)
-  if systemctl restart sshd 2>/dev/null; then
-    echo "$SSH_RESULT"
-  elif systemctl restart ssh 2>/dev/null; then
+  if restart_sshd; then
     echo "$SSH_RESULT"
   else
     echo "Error: Failed to restart SSH service" >&2
