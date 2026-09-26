@@ -74,6 +74,42 @@ MAX_PERIOD_S = 1.5
 
 # Envelope periodicity below this: no reliable heartbeat in the window.
 MIN_QUALITY = 0.35
+
+# Period selection by subharmonic summation: autocorrelation at 1x..3x the
+# lag, weights decaying by 0.84 per harmonic (Hermes 1988), each multiple
+# searched within +-5% for beat-to-beat variability.
+SHS_HARMONICS = 3
+SHS_DECAY = 0.84
+SHS_TOL = 0.05
+# A lag whose double correlates better by more than this is a within-beat
+# wave, not the period.
+SUB_PERIOD_MARGIN = 0.05
+# Likewise a lag whose half or third correlates at least as well is every
+# second or third cycle of a faster rhythm (searched down to 200 bpm).
+FASTEST_S = 0.3
+
+# Rhythm tracking across windows (as HRTracker does for the vitals, after
+# Bruser et al. 2011): a resting heart can't change rate by more than
+# TRACK_TOL between 5 s steps, so once a rhythm is established each window's
+# period must lie within TRACK_TOL of the recent median. Movement or
+# machinery can put a stronger rhythm at another rate on the sensors; those
+# windows yield no beats rather than wrong ones. RESEED_WINDOWS consistent
+# windows at a new rate (15 s) mean the rate really changed; SEED_WINDOWS
+# agreeing windows start tracking. Tracking only starts (or re-seeds) at a
+# resting rate, SEED_MIN_PERIOD_S (120 bpm) or slower, so a fast mechanical
+# rhythm present when someone lies down can't be taken for the heart; a
+# tracked rhythm may still climb past it gradually. A rhythm unseen for
+# TRACK_MAX_AGE_S is forgotten.
+TRACK_TOL = 0.20
+TRACK_HISTORY = 5
+SEED_WINDOWS = 2
+RESEED_WINDOWS = 3
+SEED_MIN_PERIOD_S = 0.5
+TRACK_MAX_AGE_S = 60.0
+
+# Beat shapes of consecutive windows correlating at least this well are the
+# same complex, so the anchor is kept on the same point of it.
+ANCHOR_MIN_SIMILARITY = 0.5
 # The other-side-cleaned channel is used unless its periodicity drops by more
 # than this (self-cancellation of the sleeper's own heartbeat drops it ~0.6).
 ANC_MAX_QUALITY_DROP = 0.10
@@ -155,12 +191,43 @@ def _envelope(x: np.ndarray, fs: int = FS) -> np.ndarray:
     return np.convolve(np.abs(x), kernel, mode="same")
 
 
-def periodicity(x: np.ndarray, fs: int = FS) -> Tuple[float, float]:
+def _subharmonic_score(ac: np.ndarray, lag: int) -> float:
+    """Weighted mean autocorrelation at 1x, 2x and 3x `lag` (each the best
+    value within SHS_TOL of the multiple, since beat-to-beat variability
+    smears later peaks)."""
+    total = weight = 0.0
+    for k in range(1, SHS_HARMONICS + 1):
+        centre = k * lag
+        tol = max(2, int(round(SHS_TOL * centre)))
+        lo, hi = centre - tol, min(ac.size, centre + tol + 1)
+        if lo >= ac.size:
+            break
+        w = SHS_DECAY ** (k - 1)
+        total += w * float(ac[lo:hi].max())
+        weight += w
+    return total / weight if weight else 0.0
+
+
+def periodicity(x: np.ndarray, fs: int = FS, prior: Optional[float] = None,
+                min_period: float = MIN_PERIOD_S) -> Tuple[float, float]:
     """(quality, period_s) from the normalised autocorrelation of the beat
     envelope over the 40-150 bpm lag range. Quality 0 = no rhythm, 1 = a
-    perfectly repeating envelope. Picks the shortest lag within 85% of the
-    best peak so a 2x period (every other beat) never wins over the true
-    one."""
+    perfectly repeating envelope.
+
+    The period is the autocorrelation peak with the best subharmonic
+    score (Hermes, 1988, J Acoust Soc Am 83:257-264): a true period repeats
+    at 2x and 3x its lag too, while the decay of the autocorrelation with
+    lag keeps 2x the period (every other beat) from winning over the true
+    one. Excluded first: a lag whose double correlates better (a secondary
+    wave inside each beat complex, which would double the count) and a lag
+    whose half or third correlates at least as well (every other or third
+    cycle of a faster rhythm).
+
+    The quality is the chosen peak's own autocorrelation, and (0, 0) means
+    no period qualifies. With a `prior` period (the rhythm being tracked),
+    only peaks within TRACK_TOL of it are considered, so a signal can be
+    strongly rhythmic at some other rate and still score 0. `min_period`
+    narrows the lag range (to rates at which tracking may start)."""
     if x.size < int(2 * MAX_PERIOD_S * fs) or not np.any(x):
         return 0.0, 0.0
     env = _envelope(x, fs)
@@ -169,7 +236,7 @@ def periodicity(x: np.ndarray, fs: int = FS) -> Tuple[float, float]:
     if denom <= 0:
         return 0.0, 0.0
     ac = correlate(env, env, mode="full", method="fft")[env.size - 1:] / denom
-    lo, hi = int(MIN_PERIOD_S * fs), int(MAX_PERIOD_S * fs)
+    lo, hi = int(min_period * fs), int(MAX_PERIOD_S * fs)
     seg = ac[lo:hi + 1]
     peaks, _ = find_peaks(seg)
     if peaks.size == 0:
@@ -177,9 +244,42 @@ def periodicity(x: np.ndarray, fs: int = FS) -> Tuple[float, float]:
     best = float(seg[peaks].max())
     if best <= 0:
         return 0.0, 0.0
-    first = int(peaks[seg[peaks] >= 0.85 * best][0])
-    lag = lo + first + _parabolic(seg, first)
-    return max(0.0, min(1.0, best)), lag / fs
+    lags = lo + peaks
+
+    def sub_period(lag: int) -> bool:
+        # A secondary wave inside each beat: the "period" at `lag` correlates
+        # worse than twice that lag, which a true rhythm never does (the
+        # autocorrelation fades with lag as beat intervals vary).
+        tol = max(2, int(round(SHS_TOL * 2 * lag)))
+        double = lags[np.abs(lags - 2 * lag) <= tol]
+        return double.size > 0 and float(ac[double].max()) > float(ac[lag]) + SUB_PERIOD_MARGIN
+
+    # Every peak of the autocorrelation down to FASTEST_S, for spotting a
+    # candidate that is only every other cycle of something faster.
+    floor = int(FASTEST_S * fs)
+    all_peaks = floor + find_peaks(ac[floor:hi + 1])[0]
+
+    def multiple(lag: int) -> bool:
+        tol = max(2, int(round(SHS_TOL * lag)))
+        for k in (2, 3):
+            part = all_peaks[np.abs(all_peaks - lag / k) <= tol]
+            if part.size and float(ac[part].max()) >= float(ac[lag]):
+                return True
+        return False
+
+    # A genuine rhythm in range always leaves its own period standing; when
+    # nothing does, whatever repeats is outside the range.
+    candidates = [p for p, lag in zip(peaks, lags)
+                  if seg[p] > 0 and not sub_period(int(lag)) and not multiple(int(lag))]
+    if prior is not None:
+        candidates = [p for p in candidates
+                      if abs((lo + p) / fs / prior - 1) <= TRACK_TOL]
+    if not candidates:
+        return 0.0, 0.0
+    scores = [_subharmonic_score(ac, lo + int(p)) for p in candidates]
+    pick = int(candidates[int(np.argmax(scores))])
+    lag = lo + pick + _parabolic(seg, pick)
+    return max(0.0, min(1.0, float(seg[pick]))), lag / fs
 
 
 def _parabolic(y: np.ndarray, i: int) -> float:
@@ -250,14 +350,17 @@ class Combined:
     aligned: List[Tuple[np.ndarray, float]]
 
 
-def combine_channels(c1: np.ndarray, c2: Optional[np.ndarray], fs: int = FS) -> Combined:
+def combine_channels(c1: np.ndarray, c2: Optional[np.ndarray], fs: int = FS,
+                     prior: Optional[float] = None,
+                     min_period: float = MIN_PERIOD_S) -> Combined:
     """Combine a side's two channels: the periodicity-weighted, lag- and
     polarity-aligned sum when that is more periodic than either channel
-    alone, else the better channel."""
-    q1, p1 = periodicity(c1, fs)
+    alone, else the better channel. Periodicity is judged at `prior` when
+    given, over lags from `min_period` (see `periodicity`)."""
+    q1, p1 = periodicity(c1, fs, prior, min_period)
     if c2 is None or c2.size != c1.size or not np.any(c2):
         return Combined(c1, p1, q1, [(c1, q1)])
-    q2, p2 = periodicity(c2, fs)
+    q2, p2 = periodicity(c2, fs, prior, min_period)
     s1, s2 = np.std(c1), np.std(c2)
     if s1 == 0 or s2 == 0:
         return Combined(c1, p1, q1, [(c1, q1)]) if s1 else Combined(c2, p2, q2, [(c2, q2)])
@@ -271,7 +374,7 @@ def combine_channels(c1: np.ndarray, c2: Optional[np.ndarray], fs: int = FS) -> 
     w1, w2 = q1 ** 2, q2 ** 2
     if w1 + w2 > 0:
         comb = (w1 * z1 + w2 * z2a) / (w1 + w2)
-        qc, pc = periodicity(comb, fs)
+        qc, pc = periodicity(comb, fs, prior, min_period)
         if qc >= max(q1, q2):
             return Combined(comb, pc, qc, aligned)
     return Combined(z1, p1, q1, aligned) if q1 >= q2 else Combined(z2a, p2, q2, aligned)
@@ -382,13 +485,18 @@ def detect_beats(x: np.ndarray, period: float, fs: int = FS,
     return pos, conf, Template(template, pol)
 
 
-def _anchor_lag(previous: Optional[Template], new: Template, fs: int) -> int:
-    """Samples by which `new`'s centre sits later on the beat complex than
-    `previous`'s (0 when unrelated or equal)."""
-    if previous is None or previous.waveform.size != new.waveform.size:
-        return 0
-    a = previous.polarity * previous.waveform
-    b = new.polarity * new.waveform
+def _shape_match(previous: Template, new: Template, fs: int) -> Tuple[int, float]:
+    """(lag, correlation) of the best alignment of `new`'s beat shape to
+    `previous`'s, each in its signal's own polarity. Templates are sized
+    from the period, so both are cropped to the shorter, centred."""
+    n = min(previous.waveform.size, new.waveform.size)
+
+    def centre(w: np.ndarray) -> np.ndarray:
+        k = (w.size - n) // 2
+        return w[k:k + n]
+
+    a = previous.polarity * centre(previous.waveform)
+    b = new.polarity * centre(new.waveform)
     a = a - a.mean()
     b = b - b.mean()
     best_lag, best_c = 0, 0.0
@@ -400,7 +508,16 @@ def _anchor_lag(previous: Optional[Template], new: Template, fs: int) -> int:
         c = float(np.dot(a, bs) / d)
         if c > best_c:
             best_lag, best_c = lag, c
-    return best_lag if best_c >= 0.5 else 0
+    return best_lag, best_c
+
+
+def _anchor_lag(previous: Optional[Template], new: Template, fs: int) -> int:
+    """Samples by which `new`'s centre sits later on the beat complex than
+    `previous`'s (0 when unrelated or equal)."""
+    if previous is None:
+        return 0
+    lag, similarity = _shape_match(previous, new, fs)
+    return lag if similarity >= ANCHOR_MIN_SIMILARITY else 0
 
 
 def confirmed_by_channels(pos: np.ndarray, template: Template,
@@ -631,6 +748,9 @@ class BeatTracker:
     _chunk_start: Optional[int] = None
     _ready: List[Chunk] = field(default_factory=list)
     _last_committed_end: Optional[float] = None
+    _rhythm: Deque[float] = field(default_factory=lambda: deque(maxlen=TRACK_HISTORY))
+    _rhythm_at: Optional[float] = None
+    _candidates: List[float] = field(default_factory=list)
 
     KEYS = ("own1", "own2", "ref1", "ref2")
 
@@ -693,8 +813,8 @@ class BeatTracker:
         if c1 is None or motion.mean() > 0.5:
             self._commit(w0, [], [], ok=False)
             return
-        comb = combine_channels(c1, c2)
-        if comb.quality < MIN_QUALITY:
+        comb = self._track(window_end, c1, c2)
+        if comb is None:
             self._commit(w0, [], [], ok=False)
             return
         pos, conf, template = detect_beats(comb.signal, comb.period, previous=self._template)
@@ -710,6 +830,42 @@ class BeatTracker:
             keep &= ~near[idx]
         breaks = _motion_starts(motion) / FS
         self._commit(w0, list(pos[keep] / FS), list(conf[keep]), ok=True, breaks=list(breaks))
+
+    def _track(self, now: float, c1: np.ndarray, c2: Optional[np.ndarray]) -> Optional[Combined]:
+        """This window's combined signal if its rhythm continues the tracked
+        one (or starts / re-seeds it); None if the window yields no beats."""
+        if self._rhythm and self._rhythm_at is not None and now - self._rhythm_at > TRACK_MAX_AGE_S:
+            self._rhythm.clear()
+            self._candidates = []
+        if self._rhythm:
+            comb = combine_channels(c1, c2, prior=float(np.median(self._rhythm)))
+            if comb.quality >= MIN_QUALITY:
+                self._candidates = []
+                return self._follow(now, comb)
+        comb = combine_channels(c1, c2, min_period=SEED_MIN_PERIOD_S)
+        if comb.quality < MIN_QUALITY:
+            if not self._rhythm:
+                self._candidates = []
+            return None
+        # A rhythm other than the tracked one (or none tracked yet): adopt it
+        # once enough consecutive windows agree on it.
+        self._candidates.append(comb.period)
+        need = RESEED_WINDOWS if self._rhythm else SEED_WINDOWS
+        recent = self._candidates[-need:]
+        if len(recent) < need:
+            return None
+        m = float(np.median(recent))
+        if not all(abs(p / m - 1) <= TRACK_TOL for p in recent):
+            return None
+        self._rhythm.clear()
+        self._rhythm.extend(recent[:-1])
+        self._candidates = []
+        return self._follow(now, comb)
+
+    def _follow(self, now: float, comb: Combined) -> Combined:
+        self._rhythm.append(comb.period)
+        self._rhythm_at = now
+        return comb
 
     @staticmethod
     def _use_reference(c: np.ndarray, refs: List[np.ndarray]) -> np.ndarray:
