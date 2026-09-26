@@ -1551,6 +1551,54 @@ class TestBeatFrontRouting:
         assert calls["left"][0] is l1 and calls["left"][1] is r1
         assert calls["right"][0] is r1 and calls["right"][1] is l1
 
+    def _spy(self, front):
+        calls = {"left": [], "right": []}
+        for side, tr in front.trackers.items():
+            tr.push = (lambda s: lambda *a: calls[s].append("push"))(side)
+            tr.gap = (lambda s: lambda: calls[s].append("gap"))(side)
+            tr.take_chunks = lambda *a, **k: []
+        return calls
+
+    def test_only_present_sides_are_tracked(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: s == "right")
+        calls = self._spy(front)
+        front.push(0.0, np.zeros(5), None, np.zeros(5), None)
+        assert calls == {"left": [], "right": ["push"]}
+
+    def test_leaving_the_bed_is_one_gap(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        here = {"left": True}
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: here.get(s, False))
+        calls = self._spy(front)
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None)
+        here["left"] = False
+        front.push(1.0, x, None, x, None)
+        front.push(2.0, x, None, x, None)
+        here["left"] = True
+        front.push(3.0, x, None, x, None)
+        assert calls["left"] == ["push", "gap", "push"]
+        assert calls["right"] == []
+
+    def test_empty_bed_vibration_writes_no_beats(self):
+        """A steady mechanical rhythm looks like a pulse to the detector;
+        with nobody present it must never reach the table."""
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: False)
+        t = np.arange(500) / 500.0
+        for sec in range(180):
+            hum = (4e5 * np.sin(2 * np.pi * 1.9 * (t + sec))).astype(np.int32)
+            front.push(1000.0 + sec, hum, hum, hum, hum)
+        front.flush()
+        assert _hb_rows(conn) == []
+
 
 class TestBeatVitals:
     def _proc_with_history(self, age_s):
