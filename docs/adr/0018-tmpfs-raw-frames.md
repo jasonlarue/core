@@ -150,3 +150,15 @@ The frank.sh-shim assumption holds on a shrinking slice of the fleet. As of 2026
 - Live validation: Pod 5 fw ca35aafa on 2026-05-04 — see PR #499
 - Rotation-delete diagnosis (`archived=0` forever) + pinning linker: observed on Pod 4 firmware, 2026-09
 - Firmware-variant gating fix: PR #594
+
+### Cleanup and cap validation
+
+`PENDING_MAX_PCT` accepts decimal integers from 1 through 99 (default 50).
+Zero, empty, negative, out-of-range, and nonnumeric values are rejected before
+any pins are created, so an invalid setting cannot silently disable the cap.
+
+Uninstall shares the NATS transition's archive-and-check barrier: stop timers
+and active jobs, restore the firmware's original working directory and restart
+it, then archive all live and pending frames before unmounting. If restarting,
+archiving, or unmounting fails, the command aborts with recovery tools retained.
+The cold archive is preserved even without `--keep-data`.

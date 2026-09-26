@@ -25,7 +25,13 @@ PENDING_DIR="${PENDING_DIR:-$TMPFS_DIR/.pending}"
 # Backstop for a stuck archiver (eMMC full, gzip failing): pinned frames must
 # never crowd out the firmware's live writes. Oldest links go first — the newest
 # frames are the ones worth replaying.
-PENDING_MAX_PCT="${PENDING_MAX_PCT:-50}"
+PENDING_MAX_PCT="${PENDING_MAX_PCT-50}"
+# Reserve some tmpfs capacity for firmware writes. Reject zero, leading zeros,
+# and arithmetic expressions before creating any pins or evaluating arithmetic.
+if [[ ! "$PENDING_MAX_PCT" =~ ^[1-9][0-9]?$ ]]; then
+  echo "linker: PENDING_MAX_PCT must be an integer from 1 to 99" >&2
+  exit 1
+fi
 
 if ! mountpoint -q "$TMPFS_DIR"; then
   echo "linker: $TMPFS_DIR is not a tmpfs mount — skipping" >&2
