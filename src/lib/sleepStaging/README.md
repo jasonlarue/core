@@ -26,9 +26,15 @@ chunks (written by the piezo-processor's beat detector, see
 and the night's movement and vitals.
 
 1. **RR intervals.** Beats become intervals; no interval spans a detector
-   break, a missing minute or a gap between chunks, so dropouts don't read as
-   long beats.
-2. **Features and model.** 30 s stages over the whole bed window. The class
+   break, a missing minute or a gap between chunks. The first beat after one
+   closes a NaN interval — SleepECG's representation of a missed beat — so
+   the 4 Hz resampling and successive differences stop at the gap instead of
+   joining the intervals on either side (which smooths away HF power and
+   reads as wake).
+2. **Features and model.** 30 s stages over the whole bed window. The
+   recording start time counts from the previous day for a start before noon
+   (00:22 → 87,720 s): the model was trained on evening starts (21:21 ± 1.6 h)
+   and a small after-midnight value is far outside what it saw. The class
    with the highest probability among NREM / REM / WAKE is taken (UNDEFINED is
    never a real stage). Stages without heart data use movement instead
    (> 200 → wake, else NREM) so short dropouts don't punch holes in the night.
@@ -49,7 +55,9 @@ the rule-based stager (`src/lib/sleep-stages.ts`) when:
 
 - `profile` — age or sex is unset for the side (Settings → Sleeper profile);
 - `coverage` — the night is under 10 minutes, or fewer than half of its
-  stages have heartbeat data.
+  stages have a usable heart-rate window (at most half of its 4.5 minutes
+  missing, SleepECG's limit for spectral features). With gappier input the
+  model leans on age and time of night rather than the heart.
 
 The response's `method` (`model` | `rules`) and `fallbackReason` say which
 path ran; the sleep-stages card shows it under the date.
@@ -58,7 +66,9 @@ path ran; the sleep-stages card shows it under the date.
 from the bed's piezo sensors are noisier, so expect lower agreement until
 this is compared against a reference device. The deep-sleep rules are
 grounded in the physiology literature, not trained, and have not been
-validated against polysomnography on this hardware.
+validated against polysomnography on this hardware. The model was trained on
+MESA participants (age 69 ± 9); for much younger sleepers it extrapolates,
+and its output is sensitive to the age input when heart data is thin.
 
 Regenerate weights and fixtures with `scripts/sleepecg/export_wrn_gru_mesa.py`
 (dev machine only).
