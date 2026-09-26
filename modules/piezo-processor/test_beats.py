@@ -125,6 +125,55 @@ DUR = 180.0
 EVAL = (15.0, DUR - 15.0)
 
 
+def secondary_wave(times, duration, at=0.43, rel_amp=0.8, amp=1000.0, fs=FS):
+    """A second wave `at` s after each J peak, as some sensor positions show
+    (on a real bed it sat ~0.43 s after the main complex)."""
+    n = int(duration * fs)
+    tt = np.arange(n) / fs
+    x = np.zeros(n)
+    for bt in times:
+        c = bt + at
+        i0, i1 = int((c - 0.2) * fs), int((c + 0.25) * fs)
+        if i0 < 0 or i1 > n:
+            continue
+        seg = tt[i0:i1]
+        x[i0:i1] += amp * rel_amp * (np.exp(-0.5 * ((seg - c) / 0.05) ** 2)
+                                     - 0.6 * np.exp(-0.5 * ((seg - c - 0.07) / 0.05) ** 2))
+    return x
+
+
+def machine_pulses(duration, rate=2.3, amp=1500.0, start=0.0, end=None, seed=3, fs=FS):
+    """A beat-like pulse train at a fixed mechanical rate (e.g. a pump):
+    stronger than the heartbeat and faster than any resting heart rate."""
+    rng = np.random.default_rng(seed)
+    n = int(duration * fs)
+    tt = np.arange(n) / fs
+    x = np.zeros(n)
+    t = start
+    end = duration if end is None else end
+    while t < end:
+        i0, i1 = max(0, int((t - 0.1) * fs)), min(n, int((t + 0.1) * fs))
+        seg = tt[i0:i1]
+        x[i0:i1] += amp * (np.exp(-0.5 * ((seg - t) / 0.02) ** 2)
+                           - 0.5 * np.exp(-0.5 * ((seg - t - 0.05) / 0.02) ** 2))
+        t += 1 / rate + rng.normal(0, 0.005)
+    return x
+
+
+def chunk_intervals(chunks, lo, hi, t0=1_700_000_000.0):
+    """Cleaned intervals (s) between consecutive beats of the same run whose
+    first beat falls in [lo, hi) s."""
+    out = []
+    for c in chunks:
+        b = c.beats
+        for i in range(len(b) - 1):
+            if b[i] is not None and b[i + 1] is not None:
+                t = c.start - t0 + b[i] / 1000
+                if lo <= t < hi:
+                    out.append((b[i + 1] - b[i]) / 1000)
+    return np.array(out)
+
+
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
@@ -275,6 +324,39 @@ class TestPeriodicity:
     def test_flat_signal_has_no_rhythm(self):
         assert B.periodicity(np.zeros(2000)) == (0.0, 0.0)
 
+    @pytest.mark.parametrize("hr", [70, 80])
+    def test_a_second_wave_inside_each_beat_is_not_the_period(self, hr):
+        # At 70 bpm the wave sits at exactly half the period.
+        truth = beat_times(40, hr=hr, seed=23)
+        x = bcg(truth, 40, seed=24) + secondary_wave(truth, 40)
+        q, period = B.periodicity(B.bandpass_decimate(x[10 * FS:30 * FS]))
+        assert q >= B.MIN_QUALITY
+        assert period == pytest.approx(60 / hr, rel=0.05)
+
+    def test_prior_confines_the_period_to_the_tracked_rhythm(self):
+        # A stronger rhythm at 0.7 s next to a 60 bpm heart (neither's
+        # multiples within TRACK_TOL of the other).
+        truth = beat_times(40, hr=60, seed=25)
+        x = B.bandpass_decimate((bcg(truth, 40, seed=26)
+                                 + machine_pulses(40, rate=1 / 0.7))[10 * FS:30 * FS])
+        _, free = B.periodicity(x)
+        assert free == pytest.approx(0.7, rel=0.05)
+        q, period = B.periodicity(x, prior=1.0)
+        assert q > 0
+        assert period == pytest.approx(1.0, rel=0.05)
+
+    def test_nothing_near_the_prior_is_no_rhythm(self):
+        truth = beat_times(40, hr=60, rsa_ms=0, jitter_ms=0, seed=27)
+        x = B.bandpass_decimate(bcg(truth, 40, noise=50, seed=28)[10 * FS:30 * FS])
+        assert B.periodicity(x, prior=0.6) == (0.0, 0.0)
+
+    def test_every_other_cycle_of_a_fast_rhythm_is_not_a_period(self):
+        x = B.bandpass_decimate(machine_pulses(40)[10 * FS:30 * FS])
+        _, full = B.periodicity(x)
+        assert full == pytest.approx(1 / 2.3, rel=0.05)
+        # Above 0.5 s only its 2x and 3x multiples remain: neither counts.
+        assert B.periodicity(x, min_period=0.5) == (0.0, 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Artifact correction
@@ -412,3 +494,70 @@ class TestChunks:
         assert [c.start for c in chunks] == [60, 120]
         assert chunks[0].beats[-1] is not None
         assert chunks[1].beats[0] is None
+
+
+# ---------------------------------------------------------------------------
+# Rhythm tracking
+# ---------------------------------------------------------------------------
+
+class TestRhythmTracking:
+    def test_rate_stays_right_through_a_stronger_rhythm(self):
+        truth = beat_times(DUR, hr=75, seed=31)
+        x = bcg(truth, DUR, seed=32) + machine_pulses(DUR, start=80, end=110)
+        _, detected, chunks = run_tracker(x)
+        during = chunk_intervals(chunks, 80, 110)
+        assert during.size > 0
+        assert np.all(np.abs(during / 0.8 - 1) <= B.REL_TOL + 0.05)
+        sens, ppv, _ = score(truth, detected, 120, DUR - 15)
+        assert sens >= 0.95 and ppv >= 0.95
+
+    def test_a_fast_rhythm_at_lie_down_is_not_taken_for_the_heart(self):
+        truth = beat_times(DUR, hr=75, seed=33)
+        x = bcg(truth, DUR, seed=34) + machine_pulses(DUR, start=0, end=45)
+        _, detected, chunks = run_tracker(x)
+        assert np.all(chunk_intervals(chunks, 0, DUR) >= 0.6)
+        sens, ppv, _ = score(truth, detected, 70, DUR - 15)
+        assert sens >= 0.95 and ppv >= 0.95
+
+    def test_a_machine_rhythm_alone_gives_no_beats(self):
+        x = machine_pulses(120) + np.random.default_rng(35).normal(0, 150, 120 * FS)
+        _, detected, _ = run_tracker(x)
+        assert detected.size == 0
+
+    def test_a_real_rate_change_is_followed(self):
+        before = beat_times(90, hr=60, seed=36)
+        after = 90 + beat_times(90, hr=85, start=0.7, seed=37)
+        truth = np.concatenate([before, after])
+        _, detected, _ = run_tracker(bcg(truth, DUR, seed=38))
+        for lo, hi in ((15, 88), (120, DUR - 15)):
+            sens, ppv, _ = score(truth, detected, lo, hi)
+            assert sens >= 0.95 and ppv >= 0.95
+
+    def test_a_tracked_rate_can_climb_past_the_start_limit(self):
+        rng = np.random.default_rng(39)
+        times, t = [], 2.0
+        while t < DUR - 1:
+            hr = 95 + 35 * min(1.0, max(0.0, (t - 30) / 90))  # 95 -> 130 bpm
+            times.append(t)
+            t += 60 / hr + rng.normal(0, 0.01)
+        truth = np.array(times)
+        _, detected, _ = run_tracker(bcg(truth, DUR, seed=40))
+        sens, ppv, _ = score(truth, detected, 130, DUR - 15)
+        assert sens >= 0.9 and ppv >= 0.95
+
+    def test_tracking_only_starts_at_a_resting_rate(self):
+        truth = beat_times(120, hr=125, seed=41)
+        _, detected, _ = run_tracker(bcg(truth, 120, seed=42))
+        assert detected.size == 0
+
+
+class TestAnchor:
+    def test_templates_of_different_lengths_still_align(self):
+        # Template length follows the period, so consecutive windows often
+        # differ by a sample or two; the anchor must still carry over.
+        w = np.asarray(_complex(), dtype=float)[::5]
+        previous = B.Template(w[5:-5], 1)
+        # The complex sits 3 samples later in the new window, so the new
+        # centre is 3 samples earlier on it.
+        new = B.Template(B._shift(w, 3)[4:-4], 1)
+        assert B._anchor_lag(previous, new, B.FS) == -3
