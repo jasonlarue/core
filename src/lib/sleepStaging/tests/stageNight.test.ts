@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { beatsToRri, MIN_BEAT_COVERAGE, secondsSinceLocalMidnight, stageNight, type HeartbeatChunk } from '../stageNight'
+import { beatsToRri, MIN_BEAT_COVERAGE, recordingStartSec, secondsSinceLocalMidnight, stageNight, type HeartbeatChunk } from '../stageNight'
 import parity from './fixtures/wrn-gru-mesa.parity.json'
 
 const T0 = Date.UTC(2026, 8, 25, 3, 15, 0) // 23:15 in America/New_York (EDT)
@@ -25,20 +25,22 @@ describe('beatsToRri', () => {
     expect(rriTimes).toEqual([59, 60, 61])
   })
 
-  it('never spans a stored break', () => {
+  it('marks a stored break as a missed beat, never an interval across it', () => {
     const chunks: HeartbeatChunk[] = [{ timestamp: new Date(T0), beats: [0, 1000, null, 2500, 3500] }]
-    expect(beatsToRri(chunks, T0, T0 + 60_000).rri).toEqual([1, 1])
+    const { rri, rriTimes } = beatsToRri(chunks, T0, T0 + 60_000)
+    expect(rri).toEqual([1, NaN, 1])
+    expect(rriTimes).toEqual([1, 2.5, 3.5])
   })
 
-  it('never spans a missing minute', () => {
+  it('marks a missing minute as a missed beat', () => {
     const chunks: HeartbeatChunk[] = [
       { timestamp: new Date(T0), beats: [59_000] },
       { timestamp: new Date(T0 + 120_000), beats: [500, 1500] },
     ]
-    expect(beatsToRri(chunks, T0, T0 + 180_000).rri).toEqual([1])
+    expect(beatsToRri(chunks, T0, T0 + 180_000)).toEqual({ rri: [NaN, 1], rriTimes: [120.5, 121.5] })
   })
 
-  it('ignores beats outside the session', () => {
+  it('ignores beats outside the session, and a run starting it has no gap before it', () => {
     const { rri } = beatsToRri(chunk([-2, -1, 0, 1, 2]), T0, T0 + 1500)
     expect(rri).toEqual([1])
   })
@@ -48,6 +50,24 @@ describe('secondsSinceLocalMidnight', () => {
   it('uses the device timezone', () => {
     expect(secondsSinceLocalMidnight(new Date(T0), 'America/New_York')).toBe(23 * 3600 + 15 * 60)
     expect(secondsSinceLocalMidnight(new Date(T0), 'UTC')).toBe(3 * 3600 + 15 * 60)
+  })
+})
+
+describe('recordingStartSec', () => {
+  it('keeps an evening start as is', () => {
+    expect(recordingStartSec(new Date(T0), 'America/New_York')).toBe(23 * 3600 + 15 * 60)
+  })
+
+  it('continues past midnight for a night that starts after it', () => {
+    // 00:22 local: the evening scale the model was trained on, not ~0.
+    const start = Date.UTC(2026, 8, 26, 4, 22, 0)
+    expect(recordingStartSec(new Date(start), 'America/New_York')).toBe(24 * 3600 + 22 * 60)
+  })
+
+  it('treats noon as the turn of the night', () => {
+    const noon = Date.UTC(2026, 8, 26, 16, 0, 0) // 12:00 EDT
+    expect(recordingStartSec(new Date(noon), 'America/New_York')).toBe(12 * 3600)
+    expect(recordingStartSec(new Date(noon - 1000), 'America/New_York')).toBe(36 * 3600 - 1)
   })
 })
 
@@ -78,6 +98,14 @@ describe('stageNight', () => {
     const out = stageNight({ ...base, chunks: chunk(sparse) })
     expect(out).toEqual({ ok: false, reason: 'coverage' })
     expect(MIN_BEAT_COVERAGE).toBe(0.5)
+  })
+
+  it('falls back when most heart-rate windows are gappy, even with beats in every one', () => {
+    // 4 s of beats in every 10 s: each window has intervals, but most of
+    // its time is missing, so no spectral features.
+    const gappy = beats.filter(t => t % 10 < 4)
+    const out = stageNight({ ...base, chunks: chunk(gappy) })
+    expect(out).toEqual({ ok: false, reason: 'coverage' })
   })
 
   it('stages a night in 30 s epochs with the model and deep-sleep rules', () => {

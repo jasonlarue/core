@@ -5,7 +5,8 @@
  * Returns `{ ok: false, reason }` — callers then use the rule-based stager —
  * when the model's inputs aren't there: the sleeper profile (age, sex) is
  * unset (`profile`), or the night is shorter than MIN_STAGES or fewer than
- * MIN_BEAT_COVERAGE of its stages have heartbeat data (`coverage`).
+ * MIN_BEAT_COVERAGE of its stages have a usable heart-rate window
+ * (`coverage`).
  */
 import type { SleepEpoch, SleepStage } from '@/src/lib/sleep-stages'
 import { detectDeepSleep, type DeepSleepEpoch } from './deepSleep'
@@ -17,7 +18,13 @@ const WEIGHTS = weightsJson as unknown as ModelWeights
 const STAGE_S = WRN_GRU_MESA_PARAMS.stageDuration
 const COL = Object.fromEntries(FEATURE_IDS.map((id, i) => [id, i])) as Record<(typeof FEATURE_IDS)[number], number>
 
-/** Stages needing heart data for the model to be trusted over the rules. */
+/**
+ * Share of stages that must have a usable HRV window — at most half of it
+ * missing, SleepECG's own limit for its spectral features — for the model to
+ * be trusted over the rules. The model was trained on ECG, where nearly every
+ * window qualifies; with most windows gappy its output leans on age and time
+ * of night instead of the heart.
+ */
 export const MIN_BEAT_COVERAGE = 0.5
 /** Shorter than this (in stages) and there's nothing meaningful to stage. */
 export const MIN_STAGES = 20
@@ -49,13 +56,17 @@ export type StageNightOutcome = StagedNight | UnstagedNight
 /**
  * RR intervals (s) and the times of their closing beats (s from `startMs`)
  * within [startMs, endMs). No interval spans a break, a missing minute or a
- * non-consecutive chunk.
+ * non-consecutive chunk: the first beat after one closes a NaN interval,
+ * which is how SleepECG represents a missed beat (an over-long RR marked
+ * invalid). Its resampling and successive differences then stop at the gap
+ * instead of joining the intervals on either side.
  */
 export function beatsToRri(chunks: HeartbeatChunk[], startMs: number, endMs: number) {
   const rri: number[] = []
   const rriTimes: number[] = []
   const sorted = [...chunks].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
   let prev: number | null = null
+  let seen = false // a beat in the window before the current run
   let prevChunkEnd: number | null = null
   for (const chunk of sorted) {
     const base = chunk.timestamp.getTime()
@@ -71,14 +82,27 @@ export function beatsToRri(chunks: HeartbeatChunk[], startMs: number, endMs: num
         prev = null
         continue
       }
-      if (prev !== null) {
-        rri.push((t - prev) / 1000)
+      if (prev !== null || seen) {
+        rri.push(prev !== null ? (t - prev) / 1000 : NaN)
         rriTimes.push((t - startMs) / 1000)
       }
       prev = t
+      seen = true
     }
   }
   return { rri, rriTimes }
+}
+
+/**
+ * The model's recording_start_time: seconds since local midnight, counted
+ * from the previous day for a start before noon. wrn-gru-mesa was trained on
+ * recordings started in the evening (21:21 +- 1.6 h), so a night that starts
+ * at 00:22 is 87,720 s, the same scale, not 1,320 s, 13 SD from anything it
+ * saw.
+ */
+export function recordingStartSec(date: Date, timezone: string): number {
+  const s = secondsSinceLocalMidnight(date, timezone)
+  return s < 12 * 3600 ? s + 24 * 3600 : s
 }
 
 /** Seconds since local midnight of `date` in `timezone`. */
@@ -115,12 +139,13 @@ export function stageNight(input: StageNightInput): StageNightOutcome {
     rri,
     rriTimes,
     numStages,
-    recordingStartSec: secondsSinceLocalMidnight(input.windowStart, input.timezone),
+    recordingStartSec: recordingStartSec(input.windowStart, input.timezone),
     age: input.age,
     sex: input.sex,
   })
   const hasHeart = features.map(row => Number.isFinite(row[COL.meanNN]))
-  const coverage = hasHeart.filter(Boolean).length / numStages
+  const usable = features.filter(row => Number.isFinite(row[COL.total_power])).length
+  const coverage = usable / numStages
   if (coverage < MIN_BEAT_COVERAGE) return { ok: false, reason: 'coverage' }
 
   const probs = predictStages(features, WEIGHTS)
