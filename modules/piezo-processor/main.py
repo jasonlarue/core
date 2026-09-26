@@ -269,11 +269,20 @@ class BeatFront:
     piezo channels plus the other side's as the noise reference. Finished
     minutes go to the heartbeats table; with one side in away mode (single
     sleeper), each minute keeps whichever side saw the sleeper's beats best,
-    stored under the home side."""
+    stored under the home side.
 
-    def __init__(self, holder: "DBHolder", mode: SingleSleeperMode):
+    A side's tracker only runs while `present(side)` holds. An empty bed
+    still carries regular vibration from the pod itself, which the detector
+    can mistake for a heartbeat; the vitals presence detector already tells
+    the two apart, so beats follow it. Leaving the bed is a gap, so no
+    interval spans an absence."""
+
+    def __init__(self, holder: "DBHolder", mode: SingleSleeperMode,
+                 present: Callable[[str], bool] = lambda side: True):
         self._holder = holder
         self._mode = mode
+        self._present = present
+        self._was_present = {"left": False, "right": False}
         self.trackers = {"left": BeatTracker("left"), "right": BeatTracker("right")}
 
     def history(self, side: str) -> BeatHistory:
@@ -281,8 +290,14 @@ class BeatFront:
 
     def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
              r1: np.ndarray, r2: Optional[np.ndarray]) -> None:
-        self.trackers["left"].push(ts, l1, l2, r1, r2)
-        self.trackers["right"].push(ts, r1, r2, l1, l2)
+        signals = {"left": (l1, l2, r1, r2), "right": (r1, r2, l1, l2)}
+        for side, tracker in self.trackers.items():
+            present = self._present(side)
+            if present:
+                tracker.push(ts, *signals[side])
+            elif self._was_present[side]:
+                tracker.gap()
+            self._was_present[side] = present
         self._write({s: t.take_chunks() for s, t in self.trackers.items()})
 
     def gap(self) -> None:
@@ -398,7 +413,13 @@ def main() -> None:
     left.home_side = right.home_side = bed_mode.home_side
     runtime = RuntimeCoordinator(db_holder, {"left": left, "right": right})
     runtime_problem = None
-    beat_front = BeatFront(db_holder, bed_mode)
+    sides = {"left": left, "right": right}
+    # Beats only while the side is occupied: the piezo says someone is there
+    # and the bed's capacitance presence doesn't say it's empty.
+    beat_front = BeatFront(
+        db_holder, bed_mode,
+        present=lambda s: (sides[s]._presence.state == PresenceDetector.PRESENT
+                           and bed.occupied(bed_mode.home_side() or s) is not False))
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)
