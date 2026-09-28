@@ -4,6 +4,7 @@ cbor2 / common.raw_follower / common.health are stubbed before importing main.
 Covers ts sanitization (#327) and DB write resilience (#325).
 """
 
+import pytest
 import importlib.util
 import logging
 import sqlite3
@@ -1010,3 +1011,73 @@ class TestAdaptiveProfileSeed:
                                created_at=ts, source="adaptive")
         _run(t, ts, 60, 0)
         assert t.baseline.means == before
+
+
+class TestCapSenseMovement:
+    """Pod 3/4 integer capSense: sensor noise alone changes each channel by
+    several counts per sample. Movement must be scored against that noise."""
+
+    T0 = 1_780_000_000.0
+
+    @staticmethod
+    def _tracker():
+        holder = main.DBHolder(_make_db())
+        main._db_write_failures = 0
+        return main.SessionTracker(side="left", db=holder, calibration=_Cal(),
+                                   pump_gate=main.PumpGateCapSense(),
+                                   _last_movement_write=0.0)
+
+    @staticmethod
+    def _feed(t, start, seconds, sigma, rng, rise=600, hz=2.0):
+        ts = start
+        while ts < start + seconds:
+            t.process(ts, {"type": "capSense",
+                           "left": {ch: int(round(v + rise + rng.gauss(0, sigma))) for ch, v in EMPTY.items()}})
+            ts += 1 / hz
+        return ts
+
+    @staticmethod
+    def _minutes(t):
+        return t.db.conn.execute("SELECT timestamp, total_movement FROM movement ORDER BY timestamp").fetchall()
+
+    def _night_with_burst(self):
+        import random
+        rng = random.Random(4)
+        t = self._tracker()
+        ts = self._feed(t, self.T0, 600, 6, rng, rise=0)       # empty bed
+        ts = self._feed(t, ts, 25 * 60, 6, rng)                # in bed, still
+        burst_at = ts
+        ts = self._feed(t, ts, 20, 150, rng)                   # turning over
+        self._feed(t, ts, 10 * 60, 6, rng)                     # still again
+        return t, burst_at
+
+    def test_still_minutes_score_near_zero_despite_sensor_noise(self):
+        t, burst_at = self._night_with_burst()
+        rows = self._minutes(t)
+        still = [m for ts, m in rows if self.T0 + 600 + 180 <= ts < burst_at - 60]
+        assert len(still) >= 15
+        assert max(still) <= 50
+
+    def test_a_movement_burst_shows_up_in_its_minute(self):
+        # Previously every occupied minute saturated at 1000 and the trailing
+        # baseline subtraction zeroed all of them, bursts included.
+        t, burst_at = self._night_with_burst()
+        rows = self._minutes(t)
+        around = [m for ts, m in rows if burst_at - 60 <= ts <= burst_at + 180]
+        assert max(around) >= 200
+
+    def test_noise_estimate_needs_a_minute_of_samples(self):
+        t = self._tracker()
+        assert t._capsense_movement([500.0, 500.0, 500.0]) == 0.0
+        for _ in range(main.CAPSENSE_NOISE_MIN_SAMPLES - 2):
+            t._capsense_movement([5.0, 5.0, 5.0])
+        assert t._capsense_movement([500.0, 5.0, 5.0]) == pytest.approx(500 - main.CAPSENSE_NOISE_K * 5)
+
+    def test_a_silent_channel_still_needs_a_real_change(self):
+        # A channel that barely moves has typical delta 0: the floor keeps a
+        # 1-2 count flicker from counting as movement.
+        t = self._tracker()
+        for _ in range(main.CAPSENSE_NOISE_WINDOW):
+            t._capsense_movement([0.0, 0.0, 0.0])
+        assert t._capsense_movement([2.0, 1.0, 0.0]) == 0.0
+        assert t._capsense_movement([10.0, 0.0, 0.0]) == pytest.approx(10 - main.CAPSENSE_NOISE_K * main.CAPSENSE_NOISE_FLOOR)
