@@ -1608,7 +1608,7 @@ class TestBeatFrontRouting:
         front, _ = self._front(None)
         calls = {}
         for side, tr in front.trackers.items():
-            tr.push = (lambda s: lambda ts, o1, o2, r1, r2: calls.setdefault(s, (o1, r1)))(side)
+            tr.push = (lambda s: lambda ts, o1, o2, r1, r2, masked=False: calls.setdefault(s, (o1, r1)))(side)
             tr.take_chunks = lambda *a, **k: []
         l1, r1 = np.full(5, 1), np.full(5, 2)
         front.push(0.0, l1, None, r1, None)
@@ -1618,7 +1618,7 @@ class TestBeatFrontRouting:
     def _spy(self, front):
         calls = {"left": [], "right": []}
         for side, tr in front.trackers.items():
-            tr.push = (lambda s: lambda *a: calls[s].append("push"))(side)
+            tr.push = (lambda s: lambda *a, masked=False: calls[s].append("masked" if masked else "push"))(side)
             tr.gap = (lambda s: lambda: calls[s].append("gap"))(side)
             tr.take_chunks = lambda *a, **k: []
         return calls
@@ -1648,6 +1648,25 @@ class TestBeatFrontRouting:
         front.push(3.0, x, None, x, None)
         assert calls["left"] == ["push", "gap", "push"]
         assert calls["right"] == []
+
+    def test_a_gated_record_is_pushed_masked_not_as_a_gap(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: True)
+        calls = self._spy(front)
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None, masked=True)
+        assert calls == {"left": ["masked"], "right": ["masked"]}
+
+    def test_rate_hint_reaches_that_sides_tracker(self, monkeypatch):
+        import main
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None))
+        monkeypatch.setattr(main.time, "time", lambda: 1234.0)
+        front.set_rate_hint("right", 0.9)
+        assert (front.trackers["right"]._hint, front.trackers["right"]._hint_at) == (0.9, 1234.0)
+        assert front.trackers["left"]._hint is None
 
     def test_empty_bed_vibration_writes_no_beats(self):
         """A steady mechanical rhythm looks like a pulse to the detector;
@@ -1694,3 +1713,16 @@ class TestBeatVitals:
         import main
         proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
         assert proc._beat_vitals() == (None, None)
+
+    def test_window_rate_is_the_beat_trackers_hint_not_the_beat_rate(self, monkeypatch):
+        """The hint must be independent of the beats it guides: the window
+        estimate (72 bpm here), not the beat-derived override (60 bpm)."""
+        import main
+        proc = self._proc_with_history(age_s=5)  # beats say 60 bpm
+        proc.sink = lambda cand: True
+        hints = []
+        proc.rate_hint = hints.append
+        monkeypatch.setattr(main, "subharmonic_summation_hr", lambda *a, **k: (72.0, 0.9))
+        monkeypatch.setattr(main.PresenceDetector, "update", lambda self, *a: True)
+        proc.ingest(np.random.default_rng(3).normal(0, 5e5, 15 * main.SAMPLE_RATE))
+        assert hints == [pytest.approx(60 / 72)]

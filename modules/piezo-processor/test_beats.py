@@ -561,3 +561,136 @@ class TestAnchor:
         # centre is 3 samples earlier on it.
         new = B.Template(B._shift(w, 3)[4:-4], 1)
         assert B._anchor_lag(previous, new, B.FS) == -3
+
+
+# ---------------------------------------------------------------------------
+# Rate hint (window heart rate guiding the tracker)
+# ---------------------------------------------------------------------------
+
+def _double_bump(duration, hr=64, seed=51):
+    """A heart whose every beat has a second wave as strong as the first,
+    half a period later: its envelope repeats every half-beat."""
+    per = 60 / hr
+    truth = beat_times(duration, hr=hr, seed=seed)
+    return truth, bcg(truth, duration, seed=seed + 1) + secondary_wave(truth, duration, at=per / 2, rel_amp=1.0)
+
+
+def _run_with_hint(x, hint=None, hint_age=0.0, rhythm=None, t0=1_700_000_000.0):
+    tr = B.BeatTracker("left")
+    if rhythm is not None:
+        tr._rhythm.extend(rhythm)
+        tr._rhythm_at = t0
+    chunks = []
+    for i in range(0, x.size - FS + 1, FS):
+        now = t0 + i / FS
+        if hint is not None and i % (60 * FS) == 0:
+            tr.set_rate_hint(hint, now - hint_age)
+        tr.push(now, x[i:i + FS], None, None, None)
+        chunks.extend(tr.take_chunks())
+    chunks.extend(tr.take_chunks(flush_before=float("inf")))
+    detected = [c.start + b / 1000 for c in chunks for b in c.beats if b is not None]
+    return np.array(sorted(detected)) - t0, chunks
+
+
+class TestRateHint:
+    def test_half_beats_are_the_period_without_a_prior_and_not_with_one(self):
+        truth, x = _double_bump(40)
+        seg = B.bandpass_decimate(x[10 * FS:30 * FS])
+        assert B.periodicity(seg)[1] == pytest.approx(60 / 64 / 2, rel=0.05)
+        q, period = B.periodicity(seg, prior=60 / 64)
+        assert q >= B.MIN_QUALITY
+        assert period == pytest.approx(60 / 64, rel=0.05)
+
+    def test_hint_tracks_whole_beats_through_double_waves(self):
+        truth, x = _double_bump(DUR)
+        detected, _ = _run_with_hint(x, hint=60 / 64)
+        sens, ppv, _ = score(truth, detected, 30, DUR - 15)
+        assert sens >= 0.9 and ppv >= 0.95
+
+    def test_a_tracked_rhythm_the_hint_disagrees_with_is_dropped(self):
+        # Already following half-beats (as happened on a real night): the
+        # half-beat rhythm sustains itself unless the hint breaks it.
+        truth, x = _double_bump(DUR)
+        half = [60 / 64 / 2] * 5
+        stuck, stuck_chunks = _run_with_hint(x, rhythm=half)
+        assert score(truth, stuck, 30, DUR - 15)[1] <= 0.6  # every other beat false
+        assert np.median(chunk_intervals(stuck_chunks, 30, DUR)) == pytest.approx(60 / 64 / 2, rel=0.05)
+        detected, chunks = _run_with_hint(x, hint=60 / 64, rhythm=half)
+        sens, ppv, _ = score(truth, detected, 30, DUR - 15)
+        assert sens >= 0.9 and ppv >= 0.95
+        assert np.median(chunk_intervals(chunks, 30, DUR)) == pytest.approx(60 / 64, rel=0.05)
+
+    def test_no_tracking_against_a_fresh_hint(self):
+        # One of the two estimates is wrong; guessing which would risk
+        # wrong beats, so there are none.
+        truth = beat_times(120, hr=80, seed=53)
+        detected, _ = _run_with_hint(bcg(truth, 120, seed=54), hint=1.0)
+        assert detected.size == 0
+
+    def test_a_stale_hint_is_ignored(self):
+        truth = beat_times(DUR, hr=80, seed=53)
+        detected, _ = _run_with_hint(bcg(truth, DUR, seed=54), hint=1.0, hint_age=B.HINT_MAX_AGE_S + 60)
+        sens, ppv, _ = score(truth, detected, 30, DUR - 15)
+        assert sens >= 0.95 and ppv >= 0.95
+
+
+class TestFollowing:
+    def _tracker(self, monkeypatch, quality):
+        tr = B.BeatTracker("left")
+        tr._rhythm.extend([0.8] * 3)
+        tr._rhythm_at = 100.0
+        monkeypatch.setattr(B, "combine_channels",
+                            lambda c1, c2, fs=B.FS, prior=None, min_period=B.MIN_PERIOD_S:
+                            B.Combined(c1, 0.8, quality, []))
+        return tr
+
+    def test_a_weak_window_on_the_tracked_rhythm_still_counts(self, monkeypatch):
+        assert B.FOLLOW_MIN_QUALITY < B.MIN_QUALITY
+        tr = self._tracker(monkeypatch, (B.FOLLOW_MIN_QUALITY + B.MIN_QUALITY) / 2)
+        assert tr._track(105.0, np.ones(10), None) is not None
+
+    def test_below_the_following_bar_yields_nothing(self, monkeypatch):
+        tr = self._tracker(monkeypatch, B.FOLLOW_MIN_QUALITY - 0.05)
+        assert tr._track(105.0, np.ones(10), None) is None
+
+
+class TestMaskedRecords:
+    def _run(self, x, every, masked):
+        tr = B.BeatTracker("left")
+        t0 = 1_700_000_000.0
+        chunks, blanked = [], []
+        for n, i in enumerate(range(0, x.size - FS + 1, FS)):
+            hit = n % every == every - 1
+            if hit:
+                blanked.append(i / FS)
+            if hit and not masked:
+                tr.gap()
+            else:
+                tr.push(t0 + i / FS, x[i:i + FS], None, None, None, masked=hit)
+            chunks.extend(tr.take_chunks())
+        chunks.extend(tr.take_chunks(flush_before=float("inf")))
+        detected = np.array(sorted(c.start + b / 1000 for c in chunks for b in c.beats if b is not None)) - t0
+        return detected, chunks, blanked
+
+    def test_masked_records_are_blanked_without_restarting_windows(self):
+        truth = beat_times(DUR, hr=70, seed=55)
+        x = bcg(truth, DUR, seed=56)
+        detected, chunks, blanked = self._run(x, every=20, masked=True)
+        gapped, _, _ = self._run(x, every=20, masked=False)
+        sens_masked = score(truth, detected, 30, DUR - 15)[0]
+        assert sens_masked >= 0.75
+        assert sens_masked > score(truth, gapped, 30, DUR - 15)[0] + 0.3
+        for s in blanked:
+            assert not np.any((detected >= s) & (detected < s + 1))
+
+    def test_no_interval_spans_a_masked_record(self):
+        truth = beat_times(DUR, hr=70, seed=55)
+        _, chunks, blanked = self._run(bcg(truth, DUR, seed=56), every=20, masked=True)
+        t0 = 1_700_000_000.0
+        for c in chunks:
+            b = c.beats
+            for i in range(len(b) - 1):
+                if b[i] is None or b[i + 1] is None:
+                    continue
+                lo, hi = c.start - t0 + b[i] / 1000, c.start - t0 + b[i + 1] / 1000
+                assert not any(lo < s + 1 and hi > s for s in blanked)
