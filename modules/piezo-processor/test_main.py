@@ -2073,7 +2073,7 @@ class TestBeatFrontRouting:
         front, _ = self._front(None)
         calls = {}
         for side, tr in front.trackers.items():
-            tr.push = (lambda s: lambda ts, o1, o2, r1, r2: calls.setdefault(s, (o1, r1)))(side)
+            tr.push = (lambda s: lambda ts, o1, o2, r1, r2, masked=False: calls.setdefault(s, (o1, r1)))(side)
             tr.take_chunks = lambda *a, **k: []
         l1, r1 = np.full(5, 1), np.full(5, 2)
         front.push(0.0, l1, None, r1, None)
@@ -2083,7 +2083,7 @@ class TestBeatFrontRouting:
     def _spy(self, front):
         calls = {"left": [], "right": []}
         for side, tr in front.trackers.items():
-            tr.push = (lambda s: lambda *a: calls[s].append("push"))(side)
+            tr.push = (lambda s: lambda *a, masked=False: calls[s].append("masked" if masked else "push"))(side)
             tr.gap = (lambda s: lambda: calls[s].append("gap"))(side)
             tr.take_chunks = lambda *a, **k: []
         return calls
@@ -2114,6 +2114,25 @@ class TestBeatFrontRouting:
         assert calls["left"] == ["push", "gap", "push"]
         assert calls["right"] == []
 
+    def test_a_gated_record_is_pushed_masked_not_as_a_gap(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: True)
+        calls = self._spy(front)
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None, masked=True)
+        assert calls == {"left": ["masked"], "right": ["masked"]}
+
+    def test_rate_hint_reaches_that_sides_tracker(self, monkeypatch):
+        import main
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None))
+        monkeypatch.setattr(main.time, "time", lambda: 1234.0)
+        front.set_rate_hint("right", 0.9)
+        assert (front.trackers["right"]._hint, front.trackers["right"]._hint_at) == (0.9, 1234.0)
+        assert front.trackers["left"]._hint is None
+
     def test_empty_bed_vibration_writes_no_beats(self):
         """A steady mechanical rhythm looks like a pulse to the detector;
         with nobody present it must never reach the table."""
@@ -2129,33 +2148,35 @@ class TestBeatFrontRouting:
         assert _hb_rows(conn) == []
 
 
-class TestBeatVitals:
-    def _proc_with_history(self, age_s):
+class TestRateHint:
+    def test_window_rate_is_passed_to_the_beat_tracker(self, monkeypatch):
+        """Each window's tracked heart rate guides the beat tracker (as a
+        period); the vitals themselves are unchanged."""
         import main
-        from beats import BeatHistory
+        from common.biometrics.signal import WindowEstimate
         proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
-        h = BeatHistory()
-        now = time.time()
-        # 6 minutes of beats at 1.0 s with alternating +-20 ms (RMSSD 40 ms).
-        t = now - age_s - 360
-        items = []
-        for i in range(360):
-            items.append((t, 1.0))
-            t += 1.0 + (0.02 if i % 2 else -0.02)
-        h.extend(items)
-        proc.beats = h
-        return proc
+        written = []
+        proc.sink = lambda cand: written.append(cand) or True
+        hints = []
+        proc.rate_hint = hints.append
+        monkeypatch.setattr(proc._estimator, "estimate",
+                            lambda now, *a: WindowEstimate(now, 72.0, 40.0, 15.0, 72.0, 0.9, ()))
+        monkeypatch.setattr(main.PresenceDetector, "update", lambda self, *a, **k: True)
+        proc.ingest(np.random.default_rng(3).normal(0, 5e5, 15 * main.SAMPLE_RATE))
+        assert hints == [pytest.approx(60 / 72)]
+        assert written[0].heart_rate == 72.0 and written[0].hrv == 40.0
 
-    def test_fresh_beats_supply_hr_and_rmssd(self):
-        hr, rmssd = self._proc_with_history(age_s=5)._beat_vitals()
-        assert hr == pytest.approx(60, abs=0.5)
-        assert rmssd == pytest.approx(40, abs=1)
-
-    def test_stale_beats_are_ignored(self):
+    def test_no_hint_without_a_heart_rate(self, monkeypatch):
         import main
-        assert self._proc_with_history(age_s=main.BEAT_FRESH_S + 10)._beat_vitals() == (None, None)
-
-    def test_no_history_means_no_beat_values(self):
-        import main
+        from common.biometrics.signal import WindowEstimate
         proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
-        assert proc._beat_vitals() == (None, None)
+        proc.sink = lambda cand: True
+        hints = []
+        proc.rate_hint = hints.append
+        monkeypatch.setattr(proc._estimator, "estimate",
+                            lambda now, *a: WindowEstimate(now, None, None, 15.0, None, 0.0, ()))
+        monkeypatch.setattr(main.PresenceDetector, "update", lambda self, *a, **k: True)
+        proc.ingest(np.random.default_rng(3).normal(0, 5e5, 15 * main.SAMPLE_RATE))
+        assert hints == []
+
+

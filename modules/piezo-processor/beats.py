@@ -106,6 +106,20 @@ SEED_WINDOWS = 2
 RESEED_WINDOWS = 3
 SEED_MIN_PERIOD_S = 0.5
 TRACK_MAX_AGE_S = 60.0
+# While following an established rhythm the prior already rules out other
+# rates, so a weaker window is still trustworthy: measured against a
+# wrist-worn reference this kept heart-rate error unchanged (~1 bpm) while
+# adding ~12% more beats.
+FOLLOW_MIN_QUALITY = 0.2
+
+# Rate hint: the side's window heart rate (HRTracker, from subharmonic
+# summation over 30 s — a different estimator from this one). Envelope
+# periodicity can't tell a heartbeat from half of one when each beat has
+# two similar waves, which some sleeping positions produce; the window rate
+# can (it corrects half/double readings). A fresh hint decides where
+# tracking starts, and a tracked rhythm more than TRACK_TOL from it is
+# dropped. Hints older than HINT_MAX_AGE_S are ignored.
+HINT_MAX_AGE_S = 120.0
 
 # Beat shapes of consecutive windows correlating at least this well are the
 # same complex, so the anchor is kept on the same point of it.
@@ -224,8 +238,9 @@ def periodicity(x: np.ndarray, fs: int = FS, prior: Optional[float] = None,
     cycle of a faster rhythm).
 
     The quality is the chosen peak's own autocorrelation, and (0, 0) means
-    no period qualifies. With a `prior` period (the rhythm being tracked),
-    only peaks within TRACK_TOL of it are considered, so a signal can be
+    no period qualifies. With a `prior` period (the rhythm being tracked, or
+    an independent rate estimate), only peaks within TRACK_TOL of it are
+    considered, in place of the octave filters above — so a signal can be
     strongly rhythmic at some other rate and still score 0. `min_period`
     narrows the lag range (to rates at which tracking may start)."""
     if x.size < int(2 * MAX_PERIOD_S * fs) or not np.any(x):
@@ -267,13 +282,17 @@ def periodicity(x: np.ndarray, fs: int = FS, prior: Optional[float] = None,
                 return True
         return False
 
-    # A genuine rhythm in range always leaves its own period standing; when
-    # nothing does, whatever repeats is outside the range.
-    candidates = [p for p, lag in zip(peaks, lags)
-                  if seg[p] > 0 and not sub_period(int(lag)) and not multiple(int(lag))]
     if prior is not None:
-        candidates = [p for p in candidates
-                      if abs((lo + p) / fs / prior - 1) <= TRACK_TOL]
+        # The prior settles which octave is the heart; the octave filters
+        # would reject the true period when each beat has two similar waves
+        # (then its half repeats at least as strongly).
+        candidates = [p for p in peaks
+                      if seg[p] > 0 and abs((lo + p) / fs / prior - 1) <= TRACK_TOL]
+    else:
+        # A genuine rhythm in range always leaves its own period standing;
+        # when nothing does, whatever repeats is outside the range.
+        candidates = [p for p, lag in zip(peaks, lags)
+                      if seg[p] > 0 and not sub_period(int(lag)) and not multiple(int(lag))]
     if not candidates:
         return 0.0, 0.0
     scores = [_subharmonic_score(ac, lo + int(p)) for p in candidates]
@@ -751,18 +770,32 @@ class BeatTracker:
     _rhythm: Deque[float] = field(default_factory=lambda: deque(maxlen=TRACK_HISTORY))
     _rhythm_at: Optional[float] = None
     _candidates: List[float] = field(default_factory=list)
+    _hint: Optional[float] = None        # period (s) from the window rate
+    _hint_at: Optional[float] = None
+    _mask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
 
     KEYS = ("own1", "own2", "ref1", "ref2")
+
+    def set_rate_hint(self, period: float, at: float) -> None:
+        """Independent heart period (s) measured at `at`; see HINT_MAX_AGE_S."""
+        if period > 0:
+            self._hint, self._hint_at = float(period), float(at)
 
     def gap(self) -> None:
         """Signal discontinuity (dropped records): restart windows."""
         self._emit([None])
         self._raw = {}
+        self._mask = np.zeros(0, dtype=bool)
         self._start = None
         self._next_end = None
 
     def push(self, ts: float, own1: np.ndarray, own2: Optional[np.ndarray],
-             ref1: Optional[np.ndarray], ref2: Optional[np.ndarray]) -> None:
+             ref1: Optional[np.ndarray], ref2: Optional[np.ndarray],
+             masked: bool = False) -> None:
+        """Add one record. A `masked` record (e.g. pump-gated) keeps the
+        windows running but is blanked like movement: no beat in it or
+        within MOTION_MARGIN_S of it, and no interval across it — where a
+        gap() would cost a whole window of refill."""
         n = own1.size
         if n == 0:
             return
@@ -773,11 +806,13 @@ class BeatTracker:
         if self._start is None:
             self._start = float(ts)
             self._raw = {k: np.zeros(0) for k in self.KEYS}
+            self._mask = np.zeros(0, dtype=bool)
             self._next_end = self._start + WINDOW_S
         for key, arr in zip(self.KEYS, (own1, own2, ref1, ref2)):
             if arr is None or arr.size != n:
                 arr = np.zeros(n)
             self._raw[key] = np.concatenate((self._raw[key], np.asarray(arr, dtype=np.float64)))
+        self._mask = np.concatenate((self._mask, np.full(n, masked)))
         end = self._start + self._raw["own1"].size / FS_RAW
         while self._next_end is not None and end >= self._next_end:
             self._process(self._next_end)
@@ -786,6 +821,7 @@ class BeatTracker:
             if keep_from > 0:
                 for k in self.KEYS:
                     self._raw[k] = self._raw[k][keep_from:]
+                self._mask = self._mask[keep_from:]
                 self._start += keep_from / FS_RAW
 
     def _process(self, window_end: float) -> None:
@@ -794,6 +830,14 @@ class BeatTracker:
         i1 = i0 + int(WINDOW_S * FS_RAW)
         sig = {k: bandpass_decimate(self._raw[k][i0:i1]) for k in self.KEYS}
         motion = np.zeros(sig["own1"].size, dtype=bool)
+        blank = self._mask[i0:i1][::DECIMATE][:motion.size]
+        if blank.any():
+            # Masked records, widened by the filter's ringing margin.
+            pad = int(MOTION_MARGIN_S * FS)
+            blank = np.convolve(blank.astype(float), np.ones(2 * pad + 1), mode="same") > 0
+            motion |= blank
+            for k in self.KEYS:
+                sig[k] = np.where(blank, 0.0, sig[k])
         for k in self.KEYS:
             m = motion_mask(sig[k])
             sig[k] = np.where(m, 0.0, sig[k])
@@ -837,11 +881,28 @@ class BeatTracker:
         if self._rhythm and self._rhythm_at is not None and now - self._rhythm_at > TRACK_MAX_AGE_S:
             self._rhythm.clear()
             self._candidates = []
+        hint = self._hint
+        if hint is None or self._hint_at is None or now - self._hint_at > HINT_MAX_AGE_S:
+            hint = None
+        if self._rhythm and hint is not None and abs(float(np.median(self._rhythm)) / hint - 1) > TRACK_TOL:
+            # Tracking some other rhythm than the heart rate says (typically
+            # half-beats): drop it and restart at the hinted rate.
+            self._rhythm.clear()
+            self._candidates = []
         if self._rhythm:
             comb = combine_channels(c1, c2, prior=float(np.median(self._rhythm)))
-            if comb.quality >= MIN_QUALITY:
+            if comb.quality >= FOLLOW_MIN_QUALITY:
                 self._candidates = []
                 return self._follow(now, comb)
+        if hint is not None:
+            if self._rhythm:
+                return None
+            comb = combine_channels(c1, c2, prior=hint)
+            if comb.quality < MIN_QUALITY:
+                return None
+            # This window and the independent rate agree: start here.
+            self._candidates = []
+            return self._follow(now, comb)
         comb = combine_channels(c1, c2, min_period=SEED_MIN_PERIOD_S)
         if comb.quality < MIN_QUALITY:
             if not self._rhythm:

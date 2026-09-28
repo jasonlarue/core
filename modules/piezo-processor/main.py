@@ -288,13 +288,16 @@ class BeatFront:
     def history(self, side: str) -> BeatHistory:
         return self.trackers[side].history
 
+    def set_rate_hint(self, side: str, period: float) -> None:
+        self.trackers[side].set_rate_hint(period, time.time())
+
     def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
-             r1: np.ndarray, r2: Optional[np.ndarray]) -> None:
+             r1: np.ndarray, r2: Optional[np.ndarray], masked: bool = False) -> None:
         signals = {"left": (l1, l2, r1, r2), "right": (r1, r2, l1, l2)}
         for side, tracker in self.trackers.items():
             present = self._present(side)
             if present:
-                tracker.push(ts, *signals[side])
+                tracker.push(ts, *signals[side], masked=masked)
             elif self._was_present[side]:
                 tracker.gap()
             self._was_present[side] = present
@@ -420,6 +423,10 @@ def main() -> None:
         db_holder, bed_mode,
         present=lambda s: (sides[s]._presence.state == PresenceDetector.PRESENT
                            and bed.occupied(bed_mode.home_side() or s) is not False))
+    # Each side's window heart rate guides its beat tracker (see beats.py
+    # HINT_MAX_AGE_S): envelope periodicity alone can take half-beats for beats.
+    left.rate_hint = lambda period: beat_front.set_rate_hint("left", period)
+    right.rate_hint = lambda period: beat_front.set_rate_hint("right", period)
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)
@@ -454,19 +461,20 @@ def main() -> None:
             if l_samples.size == 0 or r_samples.size == 0:
                 continue
 
-            # Pump gating — drop entire record if pump detected or guard active
+            ts = record.get("ts")
+            ts = float(ts) if isinstance(ts, (int, float)) else time.time()
+            l2 = _int32_samples(record.get("left2", b""))
+            r2 = _int32_samples(record.get("right2", b""))
+
+            # Pump gating — drop entire record if pump detected or guard active.
+            # Beat tracking blanks it instead: a restart would cost a window.
             if pump_gate.check(l_samples, r_samples):
-                beat_front.gap()
+                beat_front.push(ts, l_samples, l2, r_samples, r2, masked=True)
                 continue
 
             # Beat detection uses both piezo channels of each side, and the
             # other side as a noise reference.
-            ts = record.get("ts")
-            beat_front.push(
-                float(ts) if isinstance(ts, (int, float)) else time.time(),
-                l_samples, _int32_samples(record.get("left2", b"")),
-                r_samples, _int32_samples(record.get("right2", b"")),
-            )
+            beat_front.push(ts, l_samples, l2, r_samples, r2)
             frame_time_ms = int(time.time() * 1000)
             runtime.before_frame(bed_mode.home_side(), bed.occupied, frame_time_ms)
             left.ingest(l_samples)
