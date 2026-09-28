@@ -25,7 +25,8 @@ import { defaultGestureActionDeps } from './gestureActionHandler.deps'
 import { DeviceStateSync, getAlarmState } from './deviceStateSync'
 import { trackPrimingState, resetPrimingState, getPrimeCompletedAt } from './primeNotification'
 import { getAllPumpStallNotices } from './pumpStallNotification'
-import { cancelSnooze, getSnoozeStatus } from './snoozeManager'
+import { getSnoozeStatus, suspendSnoozes } from './snoozeManager'
+import { suspendActiveAlarms } from './alarmState'
 import { clearSharedHardwareClient, getSharedHardwareClient } from './sharedClient'
 import { applyMutationOverlay } from '../streaming/mutationOverlay'
 
@@ -162,10 +163,10 @@ export const shutdownDacMonitor = async (): Promise<void> => {
   }
 
   const monitor = g[KEYS.monitor] as DacMonitor | undefined
-  const gestureHandler = g[KEYS.gesture] as GestureActionHandler | undefined
 
-  cancelSnooze('left')
-  cancelSnooze('right')
+  // Keep pending snoozes and vibrating alarms on disk for the next process.
+  suspendSnoozes()
+  suspendActiveAlarms()
   resetPrimingState()
 
   const unsubFlow = g[KEYS.unsubFlow] as (() => void) | undefined
@@ -177,8 +178,6 @@ export const shutdownDacMonitor = async (): Promise<void> => {
   g[KEYS.unsubFlow] = null
   clearSharedHardwareClient()
   monitorInitPromise = null
-
-  gestureHandler?.cleanup()
 
   if (monitor) {
     monitor.removeAllListeners('gesture:detected')

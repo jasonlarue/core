@@ -18,6 +18,7 @@ import { HardwareCommand } from '@/src/hardware/types'
 import { broadcastMutationStatus } from '@/src/streaming/broadcastMutationStatus'
 import { cancelAutoOffTimer } from '@/src/services/autoOffWatcher'
 import { markSideMutated } from '@/src/hardware/deviceStateSync'
+import { markAlarmStarted } from '@/src/hardware/alarmState'
 import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGuard'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
@@ -437,14 +438,15 @@ export class JobManager {
       else {
         console.log(`Alarm job alarm-${sched.id} — ${sched.side} not powered; skipping temperature, firing vibration only`)
       }
-      await client.setAlarm(sched.side, {
+      const alarm = {
         vibrationIntensity: sched.vibrationIntensity,
         vibrationPattern: sched.vibrationPattern,
         duration: sched.duration,
-      })
-      broadcastMutationStatus(sched.side, {
-        isAlarmVibrating: true,
-      })
+      }
+      await client.setAlarm(sched.side, alarm)
+      // Recorded, not just broadcast: a tap gesture reads it to decide
+      // whether it snoozes or dismisses this alarm.
+      await markAlarmStarted(sched.side, alarm)
     })
   }
 
