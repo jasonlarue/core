@@ -344,13 +344,16 @@ class BeatFront:
     def history(self, side: str) -> BeatHistory:
         return self.trackers[side].history
 
+    def set_rate_hint(self, side: str, period: float) -> None:
+        self.trackers[side].set_rate_hint(period, time.time())
+
     def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
-             r1: np.ndarray, r2: Optional[np.ndarray]) -> None:
+             r1: np.ndarray, r2: Optional[np.ndarray], masked: bool = False) -> None:
         signals = {"left": (l1, l2, r1, r2), "right": (r1, r2, l1, l2)}
         for side, tracker in self.trackers.items():
             present = self._present(side)
             if present:
-                tracker.push(ts, *signals[side])
+                tracker.push(ts, *signals[side], masked=masked)
             elif self._was_present[side]:
                 tracker.gap()
             self._was_present[side] = present
@@ -1007,6 +1010,10 @@ class SideProcessor:
         self.sink: Optional[Callable[[VitalsCandidate], bool]] = None
         # Cleaned beat-to-beat history (beats.py); main() wires it in.
         self.beats: Optional[BeatHistory] = None
+        # Receives this side's tracked window heart rate as a period (s),
+        # before any beat-derived override; main() points it at the beat
+        # tracker.
+        self.rate_hint: Optional[Callable[[float], None]] = None
 
     def _beat_vitals(self) -> tuple:
         """(heart_rate, rmssd_ms) from detected beats, each None when the
@@ -1098,6 +1105,8 @@ class SideProcessor:
         # --- Heart rate (subharmonic summation + tracking) ---
         hr_raw, hr_score = subharmonic_summation_hr(hr_arr)
         hr = self._hr_tracker.update(hr_raw, hr_score)
+        if hr is not None and hr > 0 and self.rate_hint is not None:
+            self.rate_hint(60.0 / hr)
 
         # --- Breathing rate (Hilbert envelope) ---
         br = compute_breathing_rate(np.array(self._br_buf))
@@ -1191,6 +1200,10 @@ def main() -> None:
         present=lambda s: sides[s]._presence.state == PresenceDetector.PRESENT)
     left.beats = beat_front.history("left")
     right.beats = beat_front.history("right")
+    # Each side's window heart rate guides its beat tracker (see beats.py
+    # HINT_MAX_AGE_S): envelope periodicity alone can take half-beats for beats.
+    left.rate_hint = lambda period: beat_front.set_rate_hint("left", period)
+    right.rate_hint = lambda period: beat_front.set_rate_hint("right", period)
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)
@@ -1225,19 +1238,20 @@ def main() -> None:
             if l_samples.size == 0 or r_samples.size == 0:
                 continue
 
-            # Pump gating — drop entire record if pump detected or guard active
+            ts = record.get("ts")
+            ts = float(ts) if isinstance(ts, (int, float)) else time.time()
+            l2 = _int32_samples(record.get("left2", b""))
+            r2 = _int32_samples(record.get("right2", b""))
+
+            # Pump gating — drop entire record if pump detected or guard active.
+            # Beat tracking blanks it instead: a restart would cost a window.
             if pump_gate.check(l_samples, r_samples):
-                beat_front.gap()
+                beat_front.push(ts, l_samples, l2, r_samples, r2, masked=True)
                 continue
 
             # Beat detection uses both piezo channels of each side, and the
             # other side as a noise reference.
-            ts = record.get("ts")
-            beat_front.push(
-                float(ts) if isinstance(ts, (int, float)) else time.time(),
-                l_samples, _int32_samples(record.get("left2", b"")),
-                r_samples, _int32_samples(record.get("right2", b"")),
-            )
+            beat_front.push(ts, l_samples, l2, r_samples, r2)
             left.ingest(l_samples)
             right.ingest(r_samples)
 
