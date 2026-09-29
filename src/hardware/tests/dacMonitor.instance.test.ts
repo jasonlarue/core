@@ -721,6 +721,36 @@ describe('hardware/dacMonitor.instance', () => {
       expect(stateSyncRecordFlowMock).toHaveBeenCalledWith({ type: 'frzHealth', flow: 42 })
     })
 
+    it('feeds tap-gesture frames to the gesture handler, once per tap', async () => {
+      const mod = await freshModule()
+      await mod.getDacMonitor()
+      await flushMicrotasks()
+      const monitor = monitorInstances[0]
+      const cb = (onServerFrameMock.mock.calls[0]?.[0]) as ((frame: unknown) => void)
+      const ts = Math.floor(Date.now() / 1000)
+
+      cb({ type: 'tap-gesture', side: 'left', taps: 2, ts })
+      // The same tap, also reported by status polling (Pod 4: last-tap time).
+      monitor.emit('gesture:detected', { side: 'left', tapType: 'doubleTap', timestamp: new Date(), firmwareTime: ts })
+      await flushMicrotasks()
+
+      expect(gestureHandleMock).toHaveBeenCalledOnce()
+      expect(gestureHandleMock).toHaveBeenCalledWith(expect.objectContaining({ side: 'left', tapType: 'doubleTap', firmwareTime: ts }))
+      expect(stateSyncRecordFlowMock).not.toHaveBeenCalled()
+    })
+
+    it('ignores a tap-gesture record replayed from before a restart', async () => {
+      const mod = await freshModule()
+      await mod.getDacMonitor()
+      await flushMicrotasks()
+      const cb = (onServerFrameMock.mock.calls[0]?.[0]) as ((frame: unknown) => void)
+
+      cb({ type: 'tap-gesture', side: 'left', taps: 3, ts: Math.floor(Date.now() / 1000) - 600 })
+      await flushMicrotasks()
+
+      expect(gestureHandleMock).not.toHaveBeenCalled()
+    })
+
     it('isolates DeviceStateSync.sync rejections (logged, not thrown)', async () => {
       const mod = await freshModule()
       await mod.getDacMonitor()
