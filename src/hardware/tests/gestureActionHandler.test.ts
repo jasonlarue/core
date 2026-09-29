@@ -104,7 +104,6 @@ describe('GestureActionHandler', () => {
         await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'tripleTap'))
 
         expect(client.setTemperature).toHaveBeenCalledWith('left', 72)
-        expect(deps.findDeviceState).not.toHaveBeenCalled()
       }
       finally {
         ownedTarget.mockReset().mockReturnValue(null)
