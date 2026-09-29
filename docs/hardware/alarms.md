@@ -222,6 +222,17 @@ re-armed by us, and a tap only snoozes if we know an alarm is vibrating.
   `snoozeManager` with the snoozed alarm's own settings (the gesture, API
   and HomeKit paths all share it). Any other tap during an alarm just
   records it ended, since the firmware already stopped it.
+- Taps come from two places (`src/hardware/gestureDispatch.ts`): the tap
+  fields of DEVICE_STATUS, polled by `DacMonitor`, and the `tap-gesture`
+  sensor records (`{side, taps, ts}`) that some firmware writes for every
+  tap. The status fields miss a tap that stops a vibrating alarm (the
+  firmware's own "tap to dismiss"), so a snooze tap is only seen in the
+  stream; once the stream has delivered a tap it is the only source. On
+  Pod 4 firmware the status fields hold the time of the last tap, not a
+  count: a change is exactly one tap (reading it as a count turned the first
+  tap after a restart into ~1.8 billion gestures and exhausted the server's
+  memory). A tap seen by both sources is handled once, and records replayed
+  from before a restart (older than 30 s) are ignored.
 - Vibrating alarms and pending snoozes are persisted to `alarm-state.json`
   next to the database (`src/hardware/alarmPersistence.ts`) and restored on
   startup: a restart (deploy, crash) mid-alarm keeps the flag until the

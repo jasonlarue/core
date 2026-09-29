@@ -21,6 +21,7 @@ import { getTemperatureControlStatus } from '@/src/temperature/instance'
 import { connectDac, disconnectDac } from './dacTransport'
 import { DacMonitor } from './dacMonitor'
 import { GestureActionHandler } from './gestureActionHandler'
+import { GestureDispatcher, tapGestureEvent } from './gestureDispatch'
 import { defaultGestureActionDeps } from './gestureActionHandler.deps'
 import { DeviceStateSync, getAlarmState } from './deviceStateSync'
 import { trackPrimingState, resetPrimingState, getPrimeCompletedAt } from './primeNotification'
@@ -73,7 +74,9 @@ export const getDacMonitor = async (): Promise<DacMonitor> => {
       const gestureHandler = new GestureActionHandler(DAC_SOCK_PATH, defaultGestureActionDeps)
       const stateSync = new DeviceStateSync()
 
-      monitor.on('gesture:detected', (event) => {
+      // Taps arrive from status polling and, on firmware that writes them,
+      // from tap-gesture sensor records; the dispatcher handles each tap once.
+      const gestures = new GestureDispatcher((event) => {
         gestureHandler.handle(event)
         // Broadcast to WS clients so browser UI can show gesture events
         // Dynamic import to avoid circular dependency (piezoStream is started separately)
@@ -86,6 +89,7 @@ export const getDacMonitor = async (): Promise<DacMonitor> => {
           })
         }).catch(() => { /* WS not ready */ })
       })
+      monitor.on('gesture:detected', gestures.fromStatus)
       monitor.on('status:updated', (status) => {
         try {
           trackPrimingState(status.isPriming)
@@ -123,10 +127,17 @@ export const getDacMonitor = async (): Promise<DacMonitor> => {
         }).catch(() => { /* WS server may not be started yet */ })
       })
 
-      // Subscribe to frzHealth frames from the sensor stream to record flow data
+      // Sensor-stream frames for in-process use: frzHealth records flow data,
+      // tap-gesture feeds the gesture dispatcher.
       import('../streaming/piezoStream').then(({ onServerFrame }) => {
         g[KEYS.unsubFlow] = onServerFrame((frame) => {
-          stateSync.recordFlowData(frame as Record<string, unknown>)
+          const record = frame as Record<string, unknown>
+          if (record.type === 'tap-gesture') {
+            const event = tapGestureEvent(record)
+            if (event) gestures.fromStream(event)
+            return
+          }
+          stateSync.recordFlowData(record)
         })
       }).catch(() => { /* WS server may not be started yet */ })
 
