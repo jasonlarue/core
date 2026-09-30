@@ -16,13 +16,13 @@ import { tempTone, TONE_VAR } from '@/src/components/Schedule/scheduleFormat'
 import { tonightWindow } from '@/src/components/diagnostics/dashboardLogic'
 import { nightCurve, type CurvePoint } from '@/src/components/TempScreen/timelineLogic'
 import { useSideNames } from '@/src/hooks/useSideNames'
+import { useShownSides } from '@/src/providers/SideProvider'
 import { formatSetpointF, type TempUnit } from '@/src/lib/tempUtils'
 import type { Condition } from '@/src/automation/types'
 import { trpc } from '@/src/utils/trpc'
 import { clock, ownerView, ruleWindow, scheduleBands, scheduleBlocks, type Owner, type RuleMode, type SideTonight } from './automationsLogic'
 
 type Side = 'left' | 'right'
-const SIDES: Side[] = ['left', 'right']
 const HOUR = 3_600_000
 const LANE_H = 16
 
@@ -57,6 +57,8 @@ export function TonightCard({ rules, tonight, fires, unit }: {
 }) {
   const nowMinute = useNowMinute()
   const { sideName } = useSideNames()
+  // One side away: tonight is just the sleeper's side.
+  const shown = useShownSides()
   const left = trpc.schedules.getAll.useQuery({ side: 'left' }, { staleTime: 60_000 })
   const right = trpc.schedules.getAll.useQuery({ side: 'right' }, { staleTime: 60_000 })
 
@@ -92,8 +94,8 @@ export function TonightCard({ rules, tonight, fires, unit }: {
         </div>
       </div>
 
-      <div className="grid gap-2.5 @min-[640px]:grid-cols-2">
-        {SIDES.map((side) => {
+      <div className={cn('grid gap-2.5', shown.length > 1 && '@min-[640px]:grid-cols-2')}>
+        {shown.map((side) => {
           const o = ownerView(tonight?.sides[side], curves[side], now, fmt)
           return (
             <div key={side} className="flex flex-col gap-1 rounded-ctl border border-line px-4 py-3" data-testid={`owner-${side}`}>
@@ -115,7 +117,7 @@ export function TonightCard({ rules, tonight, fires, unit }: {
 
       <div className="-mx-[18px] overflow-x-auto px-[18px]">
         <div className="relative grid min-w-[560px] grid-cols-[64px_40px_minmax(0,1fr)] items-center gap-x-2 gap-y-1.5">
-          {SIDES.map(side => (
+          {shown.map(side => (
             <SideLanes
               key={side}
               side={side}

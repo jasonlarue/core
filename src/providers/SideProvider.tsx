@@ -176,6 +176,18 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
  */
 export const useSingleSleeperSide = (): Side | null => useContext(SideContext)?.singleSleeperSide ?? null
 
+const BOTH_SIDES: readonly Side[] = ['left', 'right']
+const ONLY: Record<Side, readonly Side[]> = { left: ['left'], right: ['right'] }
+
+/**
+ * The sides a per-side view lists: just the single sleeper's side while the
+ * other is away, else both. Stable arrays, safe as effect dependencies.
+ */
+export const useShownSides = (): readonly Side[] => {
+  const single = useSingleSleeperSide()
+  return single ? ONLY[single] : BOTH_SIDES
+}
+
 export const useSide = () => {
   const ctx = useContext(SideContext)
   if (!ctx) {
