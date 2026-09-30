@@ -62,3 +62,6 @@ sleepypod.local.db-wal
 *.db
 .reviews/
 __pycache__/
+
+# Replay corpora: personal health data (scripts/replay) — never commit
+/.replay/

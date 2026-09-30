@@ -186,6 +186,18 @@ Ad-hoc Python probes under `scripts/` (run in place; not copied to `/usr/local/b
 - `probe-nats-capture.py` - Subscribe to a NATS subject filter (default `raw.>`) for a fixed window, dump every message as private NDJSON (subject, headers, payload bytes, CBOR-decoded shape), and print a per-subject histogram on exit. Use on new-firmware pods to discover what frankenfirmware actually publishes before building a consumer. Its uv shebang resolves `nats-py` + `cbor2` on first run, so temporarily enable WAN or pre-warm the uv cache before running it on an internet-blocked pod. See the script header for usage.
 - `probe-cover-side.ts` / `probe-formats.ts` - One-shot TypeScript probes; ad-hoc, see file headers.
 
+## Replay (dev machine)
+
+`pnpm replay` scores the pod's sleep tracking against Apple Watch nights synced by the iOS app (see `docs/sleep-tracking-plan.md`, A0.4):
+
+```bash
+pnpm replay fetch --pod pod.local --raw   # bundles (+ raw frames) into .replay/ over the LAN API
+pnpm replay score --save base.json        # re-stage with this working tree and score
+pnpm replay score --baseline base.json    # …later, after a change: show the difference
+```
+
+`.replay/` holds personal health data and is gitignored.
+
 ## Internet Control
 
 Block all WAN internet (keep local network only):

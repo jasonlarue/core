@@ -7,7 +7,12 @@
 
 ## Execution Status
 
-Not started.
+In progress 2026-09-30 (branch `claude/eloquent-rubin-0fuo61`, on top of `feat/beat-detection-sleep-staging`):
+
+- A0.2 done: `reference_nights` table and endpoints, raw keep-list, pruner and archiver changes.
+- A0.3 done: `src/lib/sleepStaging/agreement.ts`.
+- A0.4 partly done: `pnpm replay fetch` and `pnpm replay score` (restaging is part of `score`); `replay reprocess` still needs a batch mode in the Python processors.
+- A0.1 and A1 (iOS) not started: waiting on a `jasonlarue/ios` fork to push to.
 
 ## Goal
 
@@ -85,10 +90,11 @@ Used by the replay CLI now and by the pod scoreboard in Part B.
 
 | Command | What it does |
 |---|---|
-| `replay fetch --pod <host>` | Copies biometrics.db over SSH using Python's `sqlite3` backup API (no `sqlite3` binary needed on the pod) and rsyncs kept raw archives for reference nights. Writes to a gitignored `.replay/` directory. |
-| `replay restage [--nights …]` | Runs the working tree's `stageNight()` (and fallback) on stored heartbeats, movement and vitals. No raw data needed; seconds per night; covers 90 days of nights. For model and rule changes. |
-| `replay reprocess [--nights …]` | Runs the working tree's piezo-processor and sleep-detector in a new batch mode (`--replay <dir> --db <tmp.db>`) over archived frames in order, then restages. For `beats.py`, presence and movement changes. |
-| `replay score [--baseline <git-ref\|results.json>] [--json]` | Per-night and pooled metrics, with deltas against a baseline. `--json` output is what volunteers share. |
+| `replay fetch --pod <host> [--raw]` | For every stored reference night, saves a replay bundle from `biometrics.getReplayBundle` (the watch night, the pod's in-bed window for it, the heartbeats, movement and vitals staging reads, the sleeper profile and timezone) to `.replay/nights/`. With `--raw`, also saves the night's raw frames from the pod's existing `/api/export/archive` route to `.replay/raw/`. Plain HTTP over the LAN API; no SSH. `.replay/` is gitignored. |
+| `replay score [--save <file>] [--baseline <file>] [--json]` | Re-stages every bundle with the working tree's code (`stageWindow`, the same path `getSleepStages` uses) and scores it against its reference night: per-night and pooled metrics, with changes against a saved baseline report. `--json` output carries no health data and is what volunteers share. |
+| `replay reprocess` (not built yet) | Runs the working tree's piezo-processor and sleep-detector in a new batch mode (`--replay <dir> --db <tmp.db>`) over the fetched raw frames in order, then scores. For `beats.py`, presence and movement changes. |
+
+Why bundles instead of copying `biometrics.db`: the database can reach hundreds of MB and the pod's `/tmp` is RAM-backed, while one night's bundle is well under a megabyte and needs nothing but the API.
 
 Batch-mode notes:
 

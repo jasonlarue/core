@@ -4,12 +4,11 @@ import { publicProcedure, router } from '@/src/server/trpc'
 import { biometricsDb, db } from '@/src/db'
 import { sleepRecords, vitals, movement, heartbeats, referenceNights } from '@/src/db/biometrics-schema'
 import { deviceSettings, sideSettings } from '@/src/db/schema'
-import { stageNight } from '@/src/lib/sleepStaging/stageNight'
+import { stageWindow } from '@/src/lib/sleepStaging/stageWindow'
 import { eq, and, gte, lte, desc, asc, avg, min, max, count, sql, inArray } from 'drizzle-orm'
 import { sideSchema, idSchema, validateDateRange } from '@/src/server/validation-schemas'
 import { listRawFiles } from './raw'
 import {
-  classifySleepStages,
   mergeIntoBlocks,
   calculateDistribution,
   calculateQualityScore,
@@ -33,6 +32,13 @@ import {
   rowToReferenceNight,
   type ReferenceNight,
 } from '@/src/lib/sleepStaging/referenceNight'
+import {
+  chooseWindow,
+  referencePodSpan,
+  replayBundleSchema,
+  REPLAY_BUNDLE_VERSION,
+  type ReplayBundle,
+} from '@/src/lib/sleepStaging/replayBundle'
 
 /**
  * SQL fragment: movement.timestamp falls inside an existing sleep_records
@@ -1259,7 +1265,7 @@ export const biometricsRouter = router({
             .limit(1),
           db.select({ timezone: deviceSettings.timezone }).from(deviceSettings).limit(1),
         ])
-        const staged = stageNight({
+        const { epochs, method, fallbackReason } = stageWindow({
           chunks: heartbeatRows.map(r => ({ timestamp: r.timestamp, beats: r.beats as Array<number | null> })),
           windowStart,
           windowEnd,
@@ -1269,10 +1275,6 @@ export const biometricsRouter = router({
           movement: movementData,
           vitals: vitalsData,
         })
-        const epochs = staged.ok ? staged.epochs : classifySleepStages(vitalsData, movementData)
-
-        const method = staged.ok ? 'model' as const : 'rules' as const
-        const fallbackReason = staged.ok ? null : staged.reason
 
         if (epochs.length === 0) {
           return {
@@ -1453,6 +1455,103 @@ export const biometricsRouter = router({
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: `Failed to delete reference nights: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          cause: error,
+        })
+      }
+    }),
+  /**
+   * One reference night with everything needed to re-stage and score it away
+   * from the pod — what the replay CLI (scripts/replay) fetches: the pod's
+   * in-bed window for it (the sleep record overlapping it most, else the
+   * reference span on the pod clock), the heartbeats, movement and vitals
+   * getSleepStages reads for that window, the sleeper profile and the device
+   * timezone. See src/lib/sleepStaging/replayBundle.ts.
+   */
+  getReplayBundle: publicProcedure
+    .meta({ openapi: { method: 'GET', path: '/biometrics/replay-bundle', protect: false, tags: ['Biometrics'] } })
+    .input(z.object({ referenceNightId: z.coerce.number().int().positive() }).strict())
+    .output(replayBundleSchema)
+    .query(async ({ input }): Promise<ReplayBundle> => {
+      try {
+        const [row] = await biometricsDb
+          .select()
+          .from(referenceNights)
+          .where(eq(referenceNights.id, input.referenceNightId))
+          .limit(1)
+        if (!row) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: `Reference night ${input.referenceNightId} not found` })
+        }
+        const reference = rowToReferenceNight(row)
+        const span = referencePodSpan(reference)
+
+        const records = await biometricsDb
+          .select({ id: sleepRecords.id, enteredBedAt: sleepRecords.enteredBedAt, leftBedAt: sleepRecords.leftBedAt })
+          .from(sleepRecords)
+          .where(
+            and(
+              eq(sleepRecords.side, reference.side),
+              lte(sleepRecords.enteredBedAt, new Date(span.end)),
+              gte(sleepRecords.leftBedAt, new Date(span.start)),
+            )
+          )
+        const window = chooseWindow(reference, records.map(r => ({
+          id: r.id,
+          enteredBedAt: r.enteredBedAt.getTime(),
+          leftBedAt: r.leftBedAt.getTime(),
+        })))
+        const windowStart = new Date(window.start)
+        const windowEnd = new Date(window.end)
+
+        const [vitalsRows, movementRows, heartbeatRows, [profile], [device]] = await Promise.all([
+          biometricsDb
+            .select()
+            .from(vitals)
+            .where(and(eq(vitals.side, reference.side), gte(vitals.timestamp, windowStart), lte(vitals.timestamp, windowEnd)))
+            .orderBy(asc(vitals.timestamp)),
+          biometricsDb
+            .select()
+            .from(movement)
+            .where(and(eq(movement.side, reference.side), gte(movement.timestamp, windowStart), lte(movement.timestamp, windowEnd)))
+            .orderBy(asc(movement.timestamp)),
+          biometricsDb
+            .select()
+            .from(heartbeats)
+            .where(
+              and(
+                eq(heartbeats.side, reference.side),
+                gte(heartbeats.timestamp, new Date(window.start - 60_000)),
+                lte(heartbeats.timestamp, windowEnd),
+              )
+            )
+            .orderBy(asc(heartbeats.timestamp)),
+          db.select({ age: sideSettings.age, sex: sideSettings.sex })
+            .from(sideSettings)
+            .where(eq(sideSettings.side, reference.side))
+            .limit(1),
+          db.select({ timezone: deviceSettings.timezone }).from(deviceSettings).limit(1),
+        ])
+
+        return {
+          version: REPLAY_BUNDLE_VERSION,
+          reference,
+          window,
+          profile: { age: profile?.age ?? null, sex: profile?.sex ?? null },
+          timezone: device?.timezone ?? 'America/Los_Angeles',
+          heartbeats: heartbeatRows.map(r => ({ timestamp: r.timestamp.getTime(), beats: r.beats as Array<number | null> })),
+          movement: movementRows.map(r => ({ timestamp: r.timestamp.getTime(), totalMovement: r.totalMovement })),
+          vitals: vitalsRows.map(r => ({
+            timestamp: r.timestamp.getTime(),
+            heartRate: r.heartRate,
+            hrv: r.hrv,
+            breathingRate: r.breathingRate,
+          })),
+        }
+      }
+      catch (error) {
+        if (error instanceof TRPCError) throw error
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to build replay bundle: ${error instanceof Error ? error.message : 'Unknown error'}`,
           cause: error,
         })
       }
