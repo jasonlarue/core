@@ -11,7 +11,7 @@ import { useDeviceStatus } from '@/src/hooks/useDeviceStatus'
 import { useSideNames } from '@/src/hooks/useSideNames'
 import type { TempUnit } from '@/src/lib/tempUtils'
 import { usePrefs } from '@/src/providers/PrefsProvider'
-import { useSide, type Side } from '@/src/providers/SideProvider'
+import { useShownSides, useSide, type Side } from '@/src/providers/SideProvider'
 import { trpc } from '@/src/utils/trpc'
 import { AlarmBanner } from './AlarmBanner'
 import { AlarmCard } from './AlarmCard'
@@ -37,9 +37,6 @@ const SIDES: Side[] = ['left', 'right']
  */
 const GRID = 'grid gap-3.5 min-[900px]:gap-4 min-[900px]:@min-[680px]:grid-cols-2 min-[900px]:@min-[976px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_300px]'
 const CONTEXT = 'grid content-start gap-3.5 min-[900px]:gap-3 min-[900px]:@min-[680px]:col-span-2 min-[900px]:@min-[680px]:grid-cols-2 min-[900px]:@min-[976px]:col-span-1 min-[900px]:@min-[976px]:grid-cols-1'
-// One side away: a single card with the context column beside it.
-const GRID_SINGLE = 'grid gap-3.5 min-[900px]:gap-4 min-[900px]:@min-[680px]:grid-cols-[minmax(0,1fr)_300px]'
-const CONTEXT_SINGLE = 'grid content-start gap-3.5 min-[900px]:gap-3'
 
 /**
  * Temp (home) screen.
@@ -64,15 +61,17 @@ const CONTEXT_SINGLE = 'grid content-start gap-3.5 min-[900px]:gap-3'
  * Link sides mirrors every change (drag, ±, power) to both sides. All off
  * powers down whichever sides are on, linked or not.
  *
- * With one side in away mode the screen is one sleeper's: a single card for
- * the home side (its values shown), no side switcher or Link sides, and the
- * context cards and timeline for that side. Its controls drive both halves
- * of the bed; schedule edits go to the sleeper's side, which the away side
- * follows on the pod.
+ * With one side in away mode both cards stay, linked by default (SideProvider)
+ * so the whole bed moves together. Tonight's schedule is the sleeper's — the
+ * away side follows it on the pod — so the stepper's Night/Dawn show and edit
+ * that side's, and the context cards and timeline are the sleeper's.
  */
 export const TempScreen = () => {
   const { isLinked, toggleLink, primarySide, singleSleeperSide } = useSide()
-  const shown: Side[] = singleSleeperSide ? [singleSleeperSide] : SIDES
+  const shown = useShownSides()
+  // One side away: the sleeper's schedule, context and timeline.
+  const contextSide = singleSleeperSide ?? primarySide
+  const scheduleSide = (side: Side): Side => singleSleeperSide ?? side
   const { control: variant, tempDisplay } = usePrefs()
   const { sideName } = useSideNames()
 
@@ -103,11 +102,8 @@ export const TempScreen = () => {
     right: useNightPhases('right', now, unit, tempDisplay, isStepper),
   }
 
-  // Live control (drag, ±, power) drives both halves of a single sleeper's
-  // bed. Schedule edits stay on the sleeper's side: the away side follows
-  // that schedule on the pod.
-  const targetsFor = (side: Side): Side[] => (isLinked || singleSleeperSide ? SIDES : [side])
-  const scheduleTargetsFor = (side: Side): Side[] => (isLinked ? SIDES : [side])
+  const targetsFor = (side: Side): Side[] => (isLinked ? SIDES : [side])
+  const scheduleTargetsFor = (side: Side): Side[] => (singleSleeperSide ? [singleSleeperSide] : targetsFor(side))
 
   const handleStepPhase = (side: Side, phase: NightPhaseKey, delta: number) => {
     for (const s of scheduleTargetsFor(side)) nightPhases[s].nudge(phase, delta)
@@ -152,16 +148,14 @@ export const TempScreen = () => {
       right={(
         <>
           <AutopilotStatusChip className="no-underline" />
-          {!singleSleeperSide && (
-            <Button
-              icon={Link2}
-              aria-pressed={isLinked}
-              onClick={toggleLink}
-              className={cn('hidden min-[900px]:inline-flex', isLinked ? 'bg-active text-fg' : 'text-fg-2')}
-            >
-              {isLinked ? 'Sides linked' : 'Link sides'}
-            </Button>
-          )}
+          <Button
+            icon={Link2}
+            aria-pressed={isLinked}
+            onClick={toggleLink}
+            className={cn('hidden min-[900px]:inline-flex', isLinked ? 'bg-active text-fg' : 'text-fg-2')}
+          >
+            {isLinked ? 'Sides linked' : 'Link sides'}
+          </Button>
           <Button icon={Power} onClick={handleAllOff} disabled={!anyOn}>
             All off
           </Button>
@@ -174,10 +168,10 @@ export const TempScreen = () => {
     return (
       <>
         {header}
-        <div className={singleSleeperSide ? GRID_SINGLE : GRID}>
+        <div className={GRID}>
           <Skeleton className="h-[520px]" />
-          {!singleSleeperSide && <Skeleton className="h-[520px] max-[899px]:hidden" />}
-          <div className={singleSleeperSide ? CONTEXT_SINGLE : CONTEXT}>
+          <Skeleton className="h-[520px] max-[899px]:hidden" />
+          <div className={CONTEXT}>
             <span className="sp-label" role="status">Connecting…</span>
           </div>
         </div>
@@ -221,23 +215,20 @@ export const TempScreen = () => {
         onActionComplete={() => { void refetch() }}
       />
 
-      {!singleSleeperSide && (
-        <SideSelector
-          className="min-[900px]:hidden"
-          overrides={{
-            left: { targetF: controls.left.targetF, isOn: controls.left.isOn },
-            right: { targetF: controls.right.targetF, isOn: controls.right.isOn },
-          }}
-        />
-      )}
+      <SideSelector
+        className="min-[900px]:hidden"
+        overrides={{
+          left: { targetF: controls.left.targetF, isOn: controls.left.isOn },
+          right: { targetF: controls.right.targetF, isOn: controls.right.isOn },
+        }}
+      />
 
-      <div className={singleSleeperSide ? GRID_SINGLE : GRID}>
-        {shown.map((side) => {
+      <div className={GRID}>
+        {SIDES.map((side) => {
           const c = controls[side]
           return (
             <SideCard
               key={side}
-              single={singleSleeperSide != null}
               side={side}
               name={sideName(side)}
               presence={presenceFor(side)}
@@ -263,7 +254,7 @@ export const TempScreen = () => {
                 ? {
                     tab: stepperTab[side],
                     onTabChange: tab => handleTabChange(side, tab),
-                    schedule: nightPhases[side],
+                    schedule: nightPhases[scheduleSide(side)],
                     onStepPhase: (phase, delta) => handleStepPhase(side, phase, delta),
                     now,
                   }
@@ -272,14 +263,14 @@ export const TempScreen = () => {
           )
         })}
 
-        <div className={singleSleeperSide ? CONTEXT_SINGLE : CONTEXT}>
+        <div className={CONTEXT}>
           {/* Desktop: the Schedule and sleep timeline below covers tonight. */}
           <div className="min-[900px]:hidden">
-            <TonightCard side={primarySide} unit={unit} />
+            <TonightCard side={contextSide} unit={unit} />
           </div>
-          <EnvironmentInfoPanel side={primarySide} unit={unit} />
-          <LastNightCard side={primarySide} name={sideName(primarySide)} />
-          <AlarmCard side={primarySide} />
+          <EnvironmentInfoPanel side={contextSide} unit={unit} />
+          <LastNightCard side={contextSide} name={sideName(contextSide)} />
+          <AlarmCard side={contextSide} />
         </div>
       </div>
 

@@ -22,9 +22,9 @@ interface SideContextValue {
   primarySide: Side
   /**
    * The single sleeper's side when exactly one side is in away mode, else
-   * null. While set, every screen shows just this side: selectedSide,
-   * activeSides and primarySide all report it and linking is off. The
-   * stored per-side choice is left alone and applies again when it clears.
+   * null. Views that show one person (sleep, schedule, vitals) use this side
+   * (useBiometricsSide, useShownSides); the Temp screen keeps both sides and
+   * defaults to 'both' (linked) when the mode starts.
    */
   singleSleeperSide: Side | null
 }
@@ -35,10 +35,10 @@ const STORAGE_KEY_SIDE = 'sleepypod-selected-side'
 const STORAGE_KEY_LINKED = 'sleepypod-is-linked'
 const COOKIE_KEY_SIDE = 'sleepypod-side'
 const COOKIE_MAX_AGE = 365 * 24 * 60 * 60 // 1 year in seconds
-// Earlier versions switched the stored selection to 'both' while one side was
-// away and kept the replaced selection here; it's restored once on load.
-const LEGACY_KEY_SINGLE_SLEEPER = 'sleepypod-single-sleeper-side'
-const LEGACY_KEY_PRE_SINGLE = 'sleepypod-pre-single-sleeper-selection'
+// Single-sleeper default: which home side it was applied for, and the
+// selection it replaced (restored when away mode is turned off).
+const STORAGE_KEY_SINGLE_SLEEPER = 'sleepypod-single-sleeper-side'
+const STORAGE_KEY_PRE_SINGLE = 'sleepypod-pre-single-sleeper-selection'
 
 /** Read a cookie value by name */
 function getCookie(name: string): string | null {
@@ -59,6 +59,7 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
   const [hydrated, setHydrated] = useState(false)
   const { data: settings } = trpc.settings.getAll.useQuery({}, { staleTime: 30_000 })
   const singleSleeperSide = singleSleeperSideFor(settings?.sides)
+  const settingsLoaded = settings?.sides != null
 
   // Hydrate from localStorage (primary) or cookie (fallback) on mount
   useEffect(() => {
@@ -67,15 +68,7 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
       const storedLinked = localStorage.getItem(STORAGE_KEY_LINKED)
 
       /* eslint-disable react-hooks/set-state-in-effect */
-      const legacy = JSON.parse(localStorage.getItem(LEGACY_KEY_PRE_SINGLE) ?? 'null') as
-        { side?: SideSelection, linked?: boolean } | null
-      localStorage.removeItem(LEGACY_KEY_PRE_SINGLE)
-      localStorage.removeItem(LEGACY_KEY_SINGLE_SLEEPER)
-      if (legacy?.side && ['left', 'right', 'both'].includes(legacy.side)) {
-        setSelectedSide(legacy.side)
-        setIsLinked(Boolean(legacy.linked))
-      }
-      else if (storedSide && ['left', 'right', 'both'].includes(storedSide)) {
+      if (storedSide && ['left', 'right', 'both'].includes(storedSide)) {
         setSelectedSide(storedSide)
       }
       else {
@@ -85,7 +78,7 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
           setSelectedSide(cookieSide)
         }
       }
-      if (storedLinked !== null && !legacy?.side) {
+      if (storedLinked !== null) {
         setIsLinked(storedLinked === 'true')
       }
       /* eslint-enable react-hooks/set-state-in-effect */
@@ -114,6 +107,44 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
     setCookie(COOKIE_KEY_SIDE, selectedSide)
   }, [selectedSide, isLinked, hydrated])
 
+  // When one side goes into away mode, default the control screens to 'both'
+  // (linked) once — the sleeper may drift across the bed — while leaving the
+  // user free to change it. The prior selection comes back when away mode is
+  // turned off. Keyed in storage so a reload doesn't re-apply the default
+  // over a choice the user made while in the mode.
+  useEffect(() => {
+    if (!hydrated || !settingsLoaded) return
+    try {
+      const appliedFor = localStorage.getItem(STORAGE_KEY_SINGLE_SLEEPER)
+      /* eslint-disable react-hooks/set-state-in-effect */
+      if (singleSleeperSide && appliedFor !== singleSleeperSide) {
+        if (appliedFor === null) {
+          localStorage.setItem(STORAGE_KEY_PRE_SINGLE, JSON.stringify({ side: selectedSide, linked: isLinked }))
+        }
+        localStorage.setItem(STORAGE_KEY_SINGLE_SLEEPER, singleSleeperSide)
+        setSelectedSide('both')
+        setIsLinked(true)
+      }
+      else if (!singleSleeperSide && appliedFor !== null) {
+        const prior = JSON.parse(localStorage.getItem(STORAGE_KEY_PRE_SINGLE) ?? 'null') as
+          { side?: SideSelection, linked?: boolean } | null
+        localStorage.removeItem(STORAGE_KEY_SINGLE_SLEEPER)
+        localStorage.removeItem(STORAGE_KEY_PRE_SINGLE)
+        if (prior?.side && ['left', 'right', 'both'].includes(prior.side)) {
+          setSelectedSide(prior.side)
+          setIsLinked(Boolean(prior.linked))
+        }
+      }
+      /* eslint-enable react-hooks/set-state-in-effect */
+    }
+    catch {
+      // localStorage unavailable or corrupt — leave the selection alone
+    }
+    // selectedSide/isLinked are read only to snapshot the prior selection at
+    // the transition; re-running on their changes would fight the user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, settingsLoaded, singleSleeperSide])
+
   const selectSide = useCallback((side: SideSelection) => {
     setSelectedSide(side)
     // If selecting a specific side while linked, unlink
@@ -136,23 +167,19 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
     })
   }, [])
 
-  // One side away: the whole UI is that one sleeper's side.
-  const shownSide: SideSelection = singleSleeperSide ?? selectedSide
-  const shownLinked = singleSleeperSide ? false : isLinked
-
   const activeSides: Side[]
-    = shownSide === 'both'
+    = selectedSide === 'both'
       ? ['left', 'right']
-      : [shownSide]
+      : [selectedSide]
 
   const primarySide: Side
-    = shownSide === 'right' ? 'right' : 'left'
+    = selectedSide === 'right' ? 'right' : 'left'
 
   return (
     <SideContext.Provider
       value={{
-        selectedSide: shownSide,
-        isLinked: shownLinked,
+        selectedSide,
+        isLinked,
         selectSide,
         toggleLink,
         activeSides,
