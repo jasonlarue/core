@@ -13,7 +13,7 @@ import { broadcastMutationStatus } from '@/src/streaming/broadcastMutationStatus
 import { HardwareCommand, fahrenheitToLevel } from '@/src/hardware/types'
 import type { Side } from '@/src/hardware/types'
 import { getSharedHardwareClient } from '@/src/hardware/sharedClient'
-import { markSideMutated } from '@/src/hardware/deviceStateSync'
+import { getAlarmState, markSideMutated } from '@/src/hardware/deviceStateSync'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { getAutomationEngineIfRunning } from '@/src/automation'
 import {
@@ -251,6 +251,8 @@ export const deviceRouter = router({
         const stallNotices = getAllPumpStallNotices()
         const leftSnooze = getSnoozeStatus('left')
         const rightSnooze = getSnoozeStatus('right')
+        // DEVICE_STATUS doesn't carry vibration state; mirror the WS stream's DB-backed source
+        const alarmState = getAlarmState()
 
         const convertTemp = (f: number | null) =>
           f == null ? null : (input.unit === 'C' ? Math.round(toC(f) * 10) / 10 : f)
@@ -291,11 +293,13 @@ export const deviceRouter = router({
             ...status.leftSide,
             currentTemperature: convertTemp(status.leftSide.currentTemperature),
             targetTemperature: convertTemp(status.leftSide.targetTemperature),
+            isAlarmVibrating: alarmState.left,
           },
           rightSide: {
             ...status.rightSide,
             currentTemperature: convertTemp(status.rightSide.currentTemperature),
             targetTemperature: convertTemp(status.rightSide.targetTemperature),
+            isAlarmVibrating: alarmState.right,
           },
           ...(primeCompletedAt && { primeCompletedNotification: { timestamp: primeCompletedAt } }),
           ...((stallNotices.left || stallNotices.right) && { pumpStallNotifications: stallNotices }),

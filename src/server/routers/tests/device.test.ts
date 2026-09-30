@@ -58,6 +58,7 @@ const sharedClientMock = vi.hoisted(() => {
 
 const stateSyncMock = vi.hoisted(() => ({
   markSideMutated: vi.fn(),
+  getAlarmState: vi.fn<() => { left: boolean, right: boolean }>(() => ({ left: false, right: false })),
 }))
 
 const pumpStallMock = vi.hoisted(() => ({
@@ -197,6 +198,7 @@ beforeEach(() => {
   transportMock.sendCommand.mockReset()
   sharedClientMock.sendRaw.mockReset()
   stateSyncMock.markSideMutated.mockReset()
+  stateSyncMock.getAlarmState.mockReset().mockReturnValue({ left: false, right: false })
   pumpStallMock.shouldBlock.mockReset().mockReturnValue(false)
   pumpStallNotificationMock.getAllPumpStallNotices.mockReset().mockReturnValue({ left: null, right: null })
   automationMock.registerManualOverride.mockReset()
@@ -221,6 +223,13 @@ describe('device.getStatus', () => {
     expect(result.leftSide.currentTemperature).toBe(80)
     expect(result.snooze.left.active).toBe(true)
     expect(result.primeCompletedNotification?.timestamp).toBe(1700000000000)
+  })
+
+  it('reports per-side alarm vibration state from the DB-backed alarm state', async () => {
+    stateSyncMock.getAlarmState.mockReturnValueOnce({ left: false, right: true })
+    const result = await caller.getStatus({})
+    expect(result.leftSide.isAlarmVibrating).toBe(false)
+    expect(result.rightSide.isAlarmVibrating).toBe(true)
   })
 
   it('converts to Celsius when unit=C', async () => {
