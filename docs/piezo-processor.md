@@ -220,6 +220,10 @@ Validated on synthetic ballistocardiograms with known beat times (`test_beats.py
 
 Known limit: a rhythmic disturbance that is stronger than the heartbeat and repeats within ~20% of the heart period (or at a multiple of it) can't be told apart by periodicity; beats in such stretches get the right rate but can land on the disturbance, inflating HRV there. Movement during them is usually blanked. Cost: ~0.1% of one Apple-silicon core per side (estimate ~1–1.5% on the pod's Cortex-A53).
 
+### Bed Presence Veto
+
+Piezo presence only sees vibration energy and rhythm, so strong bed vibration with nobody there (a prime, the pump on pods that don't report pump speed) passes it and produced vitals for an empty bed. Before computing vitals, a side also asks the sleep-detector, which commits presence from the capacitance sensors and saves it to `sleep-detector-state.json` (`common/bed_presence.py`). If that says the side is empty, the window is treated as absent. With one side away it asks about the home side, where the readings are stored. If the state file is missing, unreadable or more than five minutes old, presence is unknown and piezo presence stands alone.
+
 ## 6. Heart Rate Extraction
 
 ### Bandpass: 0.8-8.5 Hz

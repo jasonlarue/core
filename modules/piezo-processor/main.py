@@ -47,6 +47,7 @@ from common.nats_follower import create_follower
 from common.dialect import KNOWN_RECORD_TYPES, warn_unknown_type_once
 from common.side_mode import SingleSleeperMode
 from beats import BeatHistory, BeatTracker, Chunk
+from common.bed_presence import BedPresence
 import numpy as np
 from scipy.signal import butter, sosfiltfilt, hilbert, find_peaks
 
@@ -57,6 +58,9 @@ from scipy.signal import butter, sosfiltfilt, hilbert, find_peaks
 RAW_DATA_DIR = Path(os.environ.get("RAW_DATA_DIR", "/persistent"))
 BIOMETRICS_DB = Path(os.environ.get("BIOMETRICS_DATABASE_URL", "file:/persistent/sleepypod-data/biometrics.db").replace("file:", ""))
 SLEEPYPOD_DB = Path(os.environ.get("DATABASE_URL", "file:/persistent/sleepypod-data/sleepypod.db").replace("file:", ""))
+# The sleep-detector's saved state: its committed per-side presence.
+SLEEP_DETECTOR_STATE = Path(os.environ.get(
+    "SLEEP_DETECTOR_STATE_PATH", str(BIOMETRICS_DB.parent / "sleep-detector-state.json")))
 
 SAMPLE_RATE = 500          # Hz — piezo sensor sample rate
 VITALS_INTERVAL_S = 60     # write a vitals row every N seconds
@@ -1014,6 +1018,9 @@ class SideProcessor:
         # before any beat-derived override; main() points it at the beat
         # tracker.
         self.rate_hint: Optional[Callable[[float], None]] = None
+        # The bed's own answer to "is anyone here" (sleep-detector presence):
+        # False vetoes piezo presence, None (unknown) leaves it alone.
+        self.bed_occupied: Optional[Callable[[], Optional[bool]]] = None
 
     def _beat_vitals(self) -> tuple:
         """(heart_rate, rmssd_ms) from detected beats, each None when the
@@ -1094,6 +1101,11 @@ class SideProcessor:
                     return
 
         present = self._presence.update(med_std, acr_qual)
+        # Piezo presence is vibration energy and rhythm; a prime or the pump
+        # shaking an empty bed passes it. Trust the capacitance-based
+        # presence when the sleep-detector says nobody is there.
+        if present and self.bed_occupied is not None and self.bed_occupied() is False:
+            present = False
 
         if not present:
             # Reset the interval cursor so a return from extended absence
@@ -1214,10 +1226,16 @@ def main() -> None:
     bed_mode = SingleSleeperMode(SLEEPYPOD_DB)
     vitals_router = SingleSleeperVitals(db_holder, bed_mode)
     left.sink = right.sink = vitals_router.submit
+    # Vitals only while the bed reads occupied — on the side they're stored
+    # under, which is the home side with one side away.
+    bed = BedPresence(SLEEP_DETECTOR_STATE)
+    left.bed_occupied = lambda: bed.occupied(bed_mode.home_side() or "left")
+    right.bed_occupied = lambda: bed.occupied(bed_mode.home_side() or "right")
     sides = {"left": left, "right": right}
     beat_front = BeatFront(
         db_holder, bed_mode,
-        present=lambda s: sides[s]._presence.state == PresenceDetector.PRESENT)
+        present=lambda s: (sides[s]._presence.state == PresenceDetector.PRESENT
+                           and bed.occupied(bed_mode.home_side() or s) is not False))
     left.beats = beat_front.history("left")
     right.beats = beat_front.history("right")
     # Each side's window heart rate guides its beat tracker (see beats.py
