@@ -1697,6 +1697,28 @@ describe('JobManager residual mutation contracts', () => {
     expect(broadcastMutationStatus).toHaveBeenCalledWith('right', { isAlarmVibrating: true })
   })
 
+  it('records a scheduled alarm as vibrating, with its settings, so a tap can snooze it', async () => {
+    const { getActiveAlarmConfig, suspendActiveAlarms } = await import('@/src/hardware/alarmState')
+    vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(false)
+    try {
+      await manager.runAlarmJob({
+        ...row,
+        id: 44,
+        side: 'left',
+        dayOfWeek: 'monday',
+        time: '06:50',
+        alarmTemperature: 80,
+        vibrationIntensity: 100,
+        vibrationPattern: 'rise',
+        duration: 120,
+      })
+      expect(getActiveAlarmConfig('left')).toEqual({ vibrationIntensity: 100, vibrationPattern: 'rise', duration: 120 })
+    }
+    finally {
+      suspendActiveAlarms()
+    }
+  })
+
   it('skips away-return power-on while the guard blocks the side but still clears awayMode', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
