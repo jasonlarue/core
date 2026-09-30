@@ -106,6 +106,31 @@ describe('AlarmEditor', () => {
     })
   })
 
+  it('keeps edits when the parent passes an identical group again', async () => {
+    // The home screen rebuilds the group on every render.
+    const s = render(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={group} />)
+    fireEvent.click(s.getByRole('button', { name: 'Decrease bed temperature at wake' }))
+    fireEvent.click(s.getByRole('button', { name: 'Decrease bed temperature at wake' }))
+    expect(s.getByText('82°')).toBeTruthy()
+    s.rerender(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={{ ...group, days: [...group.days] }} />)
+    expect(s.getByText('82°')).toBeTruthy()
+    fireEvent.click(saveButton(s))
+    await waitFor(() => expect(m.batch.mutateAsync).toHaveBeenCalled())
+    expect(m.batch.mutateAsync.mock.calls[0][0].creates.alarm[0].alarmTemperature).toBe(82)
+  })
+
+  it('reloads for a different alarm, and on reopening', () => {
+    const s = render(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={group} />)
+    fireEvent.click(s.getByRole('button', { name: 'Decrease bed temperature at wake' }))
+    expect(s.getByText('83°')).toBeTruthy()
+    s.rerender(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={{ ...group, ids: [21], alarmTemperature: 70 }} />)
+    expect(s.getByText('70°')).toBeTruthy()
+    fireEvent.click(s.getByRole('button', { name: 'Increase bed temperature at wake' }))
+    s.rerender(<AlarmEditor open={false} onClose={vi.fn()} side="left" existingGroup={{ ...group, ids: [21], alarmTemperature: 70 }} />)
+    s.rerender(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={{ ...group, ids: [21], alarmTemperature: 70 }} />)
+    expect(s.getByText('70°')).toBeTruthy()
+  })
+
   it('surfaces save failures and stays open', async () => {
     m.batch.mutateAsync.mockRejectedValue(new Error('db locked'))
     const onClose = vi.fn()
