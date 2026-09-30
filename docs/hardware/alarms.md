@@ -39,6 +39,22 @@ The UI calls `device.setAlarm` for immediate tests; the scheduler calls
 the same hardware client, with the same per-side opcode (`ALARM_LEFT`
 cmd 5 or `ALARM_RIGHT` cmd 6).
 
+## Wake window
+
+An alarm can set `wakeWindow` to 10, 15, 20 or 30 minutes (0 = off). A
+`wake_window` job opens the window that many minutes before the alarm time;
+from then the scheduler reads the sleep-detector's per-minute `movement` rows
+for that side every 20 s, and the first score at or above 300 fires the alarm
+right away. The set-time job then skips that occurrence. With no movement the
+alarm fires at its set time as usual. Snoozing works the same either way.
+
+Scores come from the detector, which writes a row a minute only while it holds
+a session open, so an early fire lands within about a minute of the movement
+and an empty bed never trips it. Scheduling (or rescheduling after a reload)
+inside a window opens it immediately; the record of an early fire lives in
+memory, so a restart between an early fire and the set time lets the alarm
+fire again at the set time. See `src/scheduler/wakeWindow.ts`.
+
 ## The documented alarm opcodes
 
 frankenfirmware's binary references three alarm-related code paths. Same
