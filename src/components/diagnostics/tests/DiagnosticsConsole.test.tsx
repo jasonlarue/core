@@ -91,6 +91,7 @@ const side = (s: 'left' | 'right', over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   mocks.thermal = {
     pumpStallProtectionEnabled: true,
+    reportsPumpSpeed: true,
     heatsinkTempF: 94.2,
     ambientTempF: 76,
     sides: [side('left'), side('right', { targetTempF: 82, currentTempF: 81 })],
@@ -330,6 +331,12 @@ describe('DiagnosticsConsole thermal history', () => {
   })
 
   it('hides the warning when protection is on', () => {
+    render(<DiagnosticsConsole section="thermal" onJump={vi.fn()} />)
+    expect(screen.queryByText('Pump-stall protection off')).toBeNull()
+  })
+
+  it('hides the warning on a pod that reports no pump speed', () => {
+    mocks.thermal = { ...(mocks.thermal as object), pumpStallProtectionEnabled: false, reportsPumpSpeed: false }
     render(<DiagnosticsConsole section="thermal" onJump={vi.fn()} />)
     expect(screen.queryByText('Pump-stall protection off')).toBeNull()
   })
