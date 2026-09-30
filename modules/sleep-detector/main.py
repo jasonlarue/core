@@ -26,6 +26,7 @@ Movement scoring (Proportional Integration Mode):
   channel's typical delta, since sensor noise alone would fill the scale, and
   only when it lands on a level the channel hasn't held in the last minute:
   in some positions one channel flips between two levels with each breath.
+  Pod 3/4 epochs also skip the 3-epoch median filter, which zeroed turn-overs.
 
   Pump artifact gating (#230):
     Pump vibrations contaminate capSense2 deltas, inflating movement scores
@@ -174,19 +175,22 @@ CAPSENSE_NOISE_MIN_SAMPLES = 60
 CAPSENSE_NOISE_FLOOR = 1.0
 CAPSENSE_NOISE_UPDATE_EVERY = 30
 # A jump only counts when it lands on a level the channel hasn't held in the
-# last CAPSENSE_LEVEL_MEMORY samples (~60 s). In some lying positions one
+# last CAPSENSE_LEVEL_MEMORY samples (~3 min). In some lying positions one
 # channel flips between two fixed levels with each breath (~200 counts apart,
 # every few seconds) while the body is still; summed as deltas that scored
 # 1000 for half an hour at a time. Turning over moves the channels to new
 # levels and still counts; the return leg of an out-and-back motion doesn't.
-CAPSENSE_LEVEL_MEMORY = 120
+CAPSENSE_LEVEL_MEMORY = 360
 
 # Baseline subtraction: trailing epoch window and cold start
 BASELINE_TRAILING_EPOCHS = 30
 BASELINE_COLD_START_EPOCHS = 10  # ~10 minutes at 60s epochs
 # Percentile for baseline (5th percentile)
 BASELINE_PERCENTILE = 5
-# Median filter window (epochs)
+# Median filter window (epochs). Not applied to capSense (Pod 3/4): there a
+# turn-over is usually one busy minute between still ones, which the median
+# zeroed, and the noise margin and level memory already reject the sensor's
+# artifacts.
 MEDIAN_FILTER_WINDOW = 3
 
 # ---------------------------------------------------------------------------
@@ -1084,7 +1088,7 @@ class SessionTracker:
 
         # Set scale factor based on sensor type (Pod 3/4 int vs Pod 5 float).
         # capSense scores the excess over its noise (see CAPSENSE_NOISE_K)
-        # one to one.
+        # one to one, and skips the median filter (keyed on this factor).
         if rtype == "capSense" and self._scale_factor != 1.0:
             self._scale_factor = 1.0
         elif rtype == "capSense2" and self._scale_factor != 10.0:
@@ -1371,9 +1375,11 @@ class SessionTracker:
             # Cold start: not enough history yet, skip baseline subtraction
             score_after_baseline = raw_score
 
-        # Step 3: 3-epoch median filter for smoothing
+        # Step 3: 3-epoch median filter for smoothing (not for capSense)
         self._median_buf.append(score_after_baseline)
-        if len(self._median_buf) >= MEDIAN_FILTER_WINDOW:
+        if self._scale_factor == 1.0:
+            filtered_score = score_after_baseline
+        elif len(self._median_buf) >= MEDIAN_FILTER_WINDOW:
             filtered_score = _median(list(self._median_buf))
         else:
             # Not enough epochs yet for median filter, pass through

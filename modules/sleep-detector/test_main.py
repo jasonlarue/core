@@ -1117,11 +1117,51 @@ class TestCapSenseMovement:
         t = self._tracker()
         zero = {"out": 0, "cen": 0, "in": 0}
         ts = self._feed_levels(t, self.T0, 15 * 60, rng, lambda k: zero)
+        moved_at = ts
         before = len(t._epoch_scores)
         self._feed_levels(t, ts, 5 * 60, rng, lambda k: {"out": 400, "cen": -300, "in": 250})
-        # Raw per-minute score, before the 3-epoch median filter smooths a
-        # single busy minute away.
         assert max(list(t._epoch_scores)[before:]) >= 500
+        # ...and it reaches the stored minute (no median filter on capSense).
+        around = [m for ts, m in self._minutes(t) if moved_at - 60 <= ts <= moved_at + 120]
+        assert max(around) >= 500
+
+    def test_a_single_busy_minute_between_still_ones_is_kept(self):
+        # The 3-epoch median used to zero a lone turn-over minute.
+        import random
+        rng = random.Random(9)
+        t = self._tracker()
+        zero = {"out": 0, "cen": 0, "in": 0}
+        ts = self._feed_levels(t, self.T0, 15 * 60, rng, lambda k: zero)
+        busy_at = ts
+        ts = self._feed_levels(t, ts, 20, rng, lambda k: {"out": 40 * k, "cen": -30 * k, "in": 25 * k})
+        self._feed_levels(t, ts, 5 * 60, rng, lambda k: {"out": 800, "cen": -600, "in": 500})
+        rows = self._minutes(t)
+        busy = [m for ts, m in rows if busy_at - 60 <= ts <= busy_at + 120]
+        after = [m for ts, m in rows if busy_at + 180 <= ts]
+        assert max(busy) >= 300
+        assert max(after) <= 50
+
+    @staticmethod
+    def _flush_one(t, scale, raw, at):
+        """Write one epoch of `raw` summed movement after 20 still ones."""
+        t._scale_factor = scale
+        t._session_start = at - 3600
+        t._epoch_scores.extend([0] * 20)
+        t._median_buf.extend([0, 0])
+        t._movement_buf = [raw]
+        t._last_movement_write = at - 61
+        t._flush_movement(at)
+
+    def test_capsense_writes_a_lone_busy_epoch_unfiltered(self):
+        t = self._tracker()
+        self._flush_one(t, 1.0, 700.0, self.T0)
+        assert [m for _, m in self._minutes(t)] == [700]
+
+    def test_capsense2_keeps_the_median_filter(self):
+        # Pod 5: a lone busy epoch between still ones is still smoothed away.
+        t = self._tracker()
+        self._flush_one(t, 10.0, 70.0, self.T0)
+        assert [m for _, m in self._minutes(t)] == [0]
 
     def _warm(self, t, noise=5.0):
         for _ in range(main.CAPSENSE_NOISE_MIN_SAMPLES):
@@ -1146,14 +1186,14 @@ class TestCapSenseMovement:
         t._cap_levels.extend([[1000, 2000, 2650]])
         assert t._capsense_movement([0.0, 0.0, 250.0], [1000, 2000, 2400]) == pytest.approx(250 - main.CAPSENSE_NOISE_K * 5)
 
-    def test_levels_are_remembered_for_about_a_minute(self):
+    def test_levels_are_remembered_for_about_three_minutes(self):
         t = self._tracker()
         self._warm(t)
         t._cap_levels.append([1000, 2000, 2400])
         t._cap_levels.extend([[1000, 2000, 2650]] * (main.CAPSENSE_LEVEL_MEMORY + 1))
         # 2400 has aged out of the memory: the jump counts again.
         assert t._capsense_movement([0.0, 0.0, 250.0], [1000, 2000, 2400]) == pytest.approx(250 - main.CAPSENSE_NOISE_K * 5)
-        assert main.CAPSENSE_LEVEL_MEMORY == 120
+        assert main.CAPSENSE_LEVEL_MEMORY == 360
 
     def test_each_channel_is_judged_on_its_own_levels(self):
         t = self._tracker()
