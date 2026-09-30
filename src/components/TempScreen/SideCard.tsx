@@ -39,6 +39,8 @@ export interface SideCardProps {
   onResumed: () => void
   /** Phones show one side at a time; the other card is hidden below 900px. */
   hiddenOnPhone?: boolean
+  /** The only card (one side away): no Left/Right label. */
+  single?: boolean
   /** Stepper variant only: Now / Night / Dawn selection and tonight's schedule. */
   stepper?: {
     tab: StepperTab
@@ -49,8 +51,8 @@ export interface SideCardProps {
   }
 }
 
-function sideLine(side: Side, presence: Presence, away: boolean) {
-  const parts = [side === 'left' ? 'Left' : 'Right']
+function sideLine(side: Side, presence: Presence, away: boolean, single = false) {
+  const parts = single ? [] : [side === 'left' ? 'Left' : 'Right']
   if (away) parts.push('Away')
   else if (presence) parts.push(presence === 'in' ? 'In bed' : 'Out of bed')
   return parts.join(' · ')
@@ -64,6 +66,7 @@ function sideLine(side: Side, presence: Presence, away: boolean) {
  */
 export function SideCard({
   side,
+  single = false,
   name,
   presence,
   away,
@@ -87,7 +90,7 @@ export function SideCard({
   stepper,
 }: SideCardProps) {
   const isStepper = variant === 'stepper' && stepper != null
-  const line = sideLine(side, presence, away)
+  const line = sideLine(side, presence, away, single)
 
   return (
     <Card

@@ -1,4 +1,4 @@
-import { act, cleanup, render } from '@testing-library/react'
+import { cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SideProvider, useSide } from '../SideProvider'
 
@@ -34,47 +34,53 @@ describe('SideProvider single-sleeper mode', () => {
     render(tree())
     expect(ctx.singleSleeperSide).toBeNull()
     expect(ctx.selectedSide).toBe('right')
+    expect(ctx.activeSides).toEqual(['right'])
   })
 
-  it('defaults control screens to both (linked) when one side goes away', () => {
-    localStorage.setItem('sleepypod-selected-side', 'right')
+  it('shows only the home side, unlinked, while the other side is away', () => {
+    localStorage.setItem('sleepypod-selected-side', 'both')
+    localStorage.setItem('sleepypod-is-linked', 'true')
     state.sides = away(false, true)
     render(tree())
     expect(ctx.singleSleeperSide).toBe('left')
-    expect(ctx.selectedSide).toBe('both')
-    expect(ctx.isLinked).toBe(true)
+    expect(ctx.selectedSide).toBe('left')
+    expect(ctx.activeSides).toEqual(['left'])
+    expect(ctx.primarySide).toBe('left')
+    expect(ctx.isLinked).toBe(false)
   })
 
-  it('still lets the user pick a side, and a reload keeps that choice', () => {
+  it('follows the home side to the right', () => {
     state.sides = away(true, false)
-    const first = render(tree())
-    act(() => ctx.selectSide('left'))
-    expect(ctx.selectedSide).toBe('left')
-    first.unmount()
     render(tree())
-    expect(ctx.selectedSide).toBe('left')
-    expect(ctx.singleSleeperSide).toBe('right')
+    expect(ctx.selectedSide).toBe('right')
+    expect(ctx.activeSides).toEqual(['right'])
+    expect(ctx.primarySide).toBe('right')
   })
 
-  it('restores the previous selection when away mode is turned off', () => {
-    localStorage.setItem('sleepypod-selected-side', 'right')
+  it('leaves the stored choice alone and applies it again when away mode ends', () => {
+    localStorage.setItem('sleepypod-selected-side', 'both')
+    localStorage.setItem('sleepypod-is-linked', 'true')
     state.sides = away(false, true)
     const { rerender } = render(tree())
-    expect(ctx.selectedSide).toBe('both')
+    expect(ctx.activeSides).toEqual(['left'])
+    expect(localStorage.getItem('sleepypod-selected-side')).toBe('both')
     state.sides = away(false, false)
     rerender(tree())
-    expect(ctx.selectedSide).toBe('right')
-    expect(ctx.isLinked).toBe(false)
-    expect(localStorage.getItem('sleepypod-single-sleeper-side')).toBeNull()
+    expect(ctx.selectedSide).toBe('both')
+    expect(ctx.isLinked).toBe(true)
+    expect(ctx.activeSides).toEqual(['left', 'right'])
   })
 
-  it('waits for settings before deciding (no flip-flop on load)', () => {
-    localStorage.setItem('sleepypod-selected-side', 'right')
+  it('restores a selection an earlier version set aside, once', () => {
+    localStorage.setItem('sleepypod-selected-side', 'both')
+    localStorage.setItem('sleepypod-is-linked', 'true')
     localStorage.setItem('sleepypod-single-sleeper-side', 'left')
-    state.sides = undefined
+    localStorage.setItem('sleepypod-pre-single-sleeper-selection', JSON.stringify({ side: 'right', linked: false }))
     render(tree())
     expect(ctx.selectedSide).toBe('right')
-    expect(localStorage.getItem('sleepypod-single-sleeper-side')).toBe('left')
+    expect(ctx.isLinked).toBe(false)
+    expect(localStorage.getItem('sleepypod-pre-single-sleeper-selection')).toBeNull()
+    expect(localStorage.getItem('sleepypod-single-sleeper-side')).toBeNull()
   })
 
   it('is per-side when both sides are away', () => {
