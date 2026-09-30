@@ -170,6 +170,12 @@ export const SideProvider = ({ children }: { children: React.ReactNode }) => {
   )
 }
 
+/**
+ * The single sleeper's side (one side in away mode), or null — also null
+ * outside a SideProvider, for components that only adapt to the mode.
+ */
+export const useSingleSleeperSide = (): Side | null => useContext(SideContext)?.singleSleeperSide ?? null
+
 export const useSide = () => {
   const ctx = useContext(SideContext)
   if (!ctx) {

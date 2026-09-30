@@ -186,7 +186,7 @@ describe('TempScreen', () => {
   })
 
   it('Link sides mirrors a change to both sides', () => {
-    m.side = { isLinked: true, primarySide: 'left' }
+    m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: null }
     const screen = render(<TempScreen />)
     tap(card(screen, 'Jon (left)').getByRole('button', { name: 'Warmer' }))
     expect(m.setTemp).toHaveBeenCalledTimes(2)
@@ -196,7 +196,7 @@ describe('TempScreen', () => {
   })
 
   it('Link sides mirrors power to both sides', () => {
-    m.side = { isLinked: true, primarySide: 'left' }
+    m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: null }
     const screen = render(<TempScreen />)
     fireEvent.click(card(screen, 'Heidi (right)').getByRole('button', { name: 'Turn off' }))
     expect(m.setPower).toHaveBeenCalledTimes(2)
@@ -301,7 +301,7 @@ describe('TempScreen', () => {
     })
 
     it('edits Night on the schedule, mirrored to both sides when linked', () => {
-      m.side = { isLinked: true, primarySide: 'left' }
+      m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: null }
       const screen = render(<TempScreen />)
       const left = card(screen, 'Jon (left)')
       fireEvent.click(left.getByRole('tab', { name: /Night/ }))
