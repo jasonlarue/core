@@ -65,8 +65,10 @@ const CONTEXT_SINGLE = 'grid content-start gap-3.5 min-[900px]:gap-3'
  * powers down whichever sides are on, linked or not.
  *
  * With one side in away mode the screen is one sleeper's: a single card for
- * the home side, no side switcher or linking, and the context cards and
- * timeline for that side.
+ * the home side (its values shown), no side switcher or Link sides, and the
+ * context cards and timeline for that side. Its controls drive both halves
+ * of the bed; schedule edits go to the sleeper's side, which the away side
+ * follows on the pod.
  */
 export const TempScreen = () => {
   const { isLinked, toggleLink, primarySide, singleSleeperSide } = useSide()
@@ -101,10 +103,14 @@ export const TempScreen = () => {
     right: useNightPhases('right', now, unit, tempDisplay, isStepper),
   }
 
-  const targetsFor = (side: Side): Side[] => (isLinked ? SIDES : [side])
+  // Live control (drag, ±, power) drives both halves of a single sleeper's
+  // bed. Schedule edits stay on the sleeper's side: the away side follows
+  // that schedule on the pod.
+  const targetsFor = (side: Side): Side[] => (isLinked || singleSleeperSide ? SIDES : [side])
+  const scheduleTargetsFor = (side: Side): Side[] => (isLinked ? SIDES : [side])
 
   const handleStepPhase = (side: Side, phase: NightPhaseKey, delta: number) => {
-    for (const s of targetsFor(side)) nightPhases[s].nudge(phase, delta)
+    for (const s of scheduleTargetsFor(side)) nightPhases[s].nudge(phase, delta)
   }
 
   /** Continuous drag — visual only, no hardware calls. */
