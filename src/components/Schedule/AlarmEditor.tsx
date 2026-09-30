@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bell, Loader2, Play, Square, Trash2 } from 'lucide-react'
 import { trpc } from '@/src/utils/trpc'
 import { Button, DayPicker, InlineError, Modal, Pill, SegmentedControl, Slider, Stepper } from '@/src/components/ds'
@@ -79,9 +79,16 @@ export function AlarmEditor({
   const [saveError, setSaveError] = useState<string | null>(null)
   const [testing, setTesting] = useState(false)
 
-  // Reset local state when opening
+  // Load the form when it opens, or when a different alarm is passed in. Not
+  // on every new `existingGroup` object: callers rebuild it on each render
+  // (the home screen re-renders with every status update), which reset any
+  // edit in progress back to the saved values.
+  const loadedFrom = useRef<string | null>(null)
   useEffect(() => {
-    if (!open) return
+    const source = !open ? null : existingGroup ? `edit:${existingGroup.ids.join(',')}` : 'new'
+    if (source === loadedFrom.current) return
+    loadedFrom.current = source
+    if (source === null) return
     /* eslint-disable react-hooks/set-state-in-effect */
     if (existingGroup) {
       setDays(new Set(existingGroup.days))
