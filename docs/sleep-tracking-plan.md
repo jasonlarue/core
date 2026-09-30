@@ -12,7 +12,7 @@ In progress 2026-09-30 (branch `claude/eloquent-rubin-0fuo61`, on top of `feat/b
 - A0.2 done: `reference_nights` table and endpoints, raw keep-list, pruner and archiver changes.
 - A0.3 done: `src/lib/sleepStaging/agreement.ts`.
 - A0.4 partly done: `pnpm replay fetch` and `pnpm replay score` (restaging is part of `score`); `replay reprocess` still needs a batch mode in the Python processors.
-- A0.1 and A1 (iOS) not started: waiting on a `jasonlarue/ios` fork to push to.
+- A0.1 and A1 (iOS) written but not compiled or pushed: branch `feat/apple-watch-reference-sync`, waiting on a `jasonlarue/ios` fork. Differences from the plan above: the app re-reads the last 21 days of watch nights and uploads new or changed ones, keyed by a per-night signature, where the plan had an anchored query. It uses the stages in the Health screen's selected night, keeping `SleepAnalyzer` only as the fallback.
 
 ## Goal
 
