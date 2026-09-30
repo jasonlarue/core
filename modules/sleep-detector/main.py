@@ -23,7 +23,9 @@ Movement scoring (Proportional Integration Mode):
   1992). This measures actual body displacement over time rather than static
   deviation from an empty-bed baseline. On Pod 3/4 (integer capSense) each
   channel's delta counts only by its excess over CAPSENSE_NOISE_K times that
-  channel's typical delta, since sensor noise alone would fill the scale.
+  channel's typical delta, since sensor noise alone would fill the scale, and
+  only when it lands on a level the channel hasn't held in the last minute:
+  in some positions one channel flips between two levels with each breath.
 
   Pump artifact gating (#230):
     Pump vibrations contaminate capSense2 deltas, inflating movement scores
@@ -171,6 +173,13 @@ CAPSENSE_NOISE_WINDOW = 1200
 CAPSENSE_NOISE_MIN_SAMPLES = 60
 CAPSENSE_NOISE_FLOOR = 1.0
 CAPSENSE_NOISE_UPDATE_EVERY = 30
+# A jump only counts when it lands on a level the channel hasn't held in the
+# last CAPSENSE_LEVEL_MEMORY samples (~60 s). In some lying positions one
+# channel flips between two fixed levels with each breath (~200 counts apart,
+# every few seconds) while the body is still; summed as deltas that scored
+# 1000 for half an hour at a time. Turning over moves the channels to new
+# levels and still counts; the return leg of an out-and-back motion doesn't.
+CAPSENSE_LEVEL_MEMORY = 120
 
 # Baseline subtraction: trailing epoch window and cold start
 BASELINE_TRAILING_EPOCHS = 30
@@ -913,6 +922,8 @@ class SessionTracker:
     _cap_deltas: deque = field(default_factory=lambda: deque(maxlen=CAPSENSE_NOISE_WINDOW))
     _cap_noise: Optional[list] = None
     _cap_since_update: int = 0
+    # Recent capSense channel values; the last one is the previous sample.
+    _cap_levels: deque = field(default_factory=lambda: deque(maxlen=CAPSENSE_LEVEL_MEMORY + 1))
     # Sessions closed only by the MAX_SESSION_S cap since the last natural
     # (absence-timeout) close. Two in a row means the presence signal never
     # dropped for 32+ hours — a stuck level signal, not a sleeper.
@@ -1095,15 +1106,20 @@ class SessionTracker:
                 delta = 0.0
                 self._pump_gated_samples += 1
             elif rtype == "capSense" and channel_deltas is not None:
-                delta = self._capsense_movement(channel_deltas)
+                delta = self._capsense_movement(channel_deltas, current_values)
+            if rtype == "capSense":
+                self._cap_levels.append(current_values)
         else:
             # Sentinel or invalid — skip delta, keep previous (zero-order hold)
             delta = 0.0
         return SideObservation(ts, present, delta, values, record)
 
-    def _capsense_movement(self, channel_deltas: list) -> float:
+    def _capsense_movement(self, channel_deltas: list,
+                           values: Optional[list] = None) -> float:
         """Sum of each channel's delta beyond CAPSENSE_NOISE_K times its
-        typical delta; 0 until CAPSENSE_NOISE_MIN_SAMPLES have been seen."""
+        typical delta; 0 until CAPSENSE_NOISE_MIN_SAMPLES have been seen.
+        With `values`, a channel landing within that margin of a level it
+        held in the last CAPSENSE_LEVEL_MEMORY samples adds nothing."""
         self._cap_deltas.append(channel_deltas)
         if len(self._cap_deltas) < CAPSENSE_NOISE_MIN_SAMPLES:
             return 0.0
@@ -1114,8 +1130,15 @@ class SessionTracker:
                 for i in range(len(channel_deltas))
             ]
             self._cap_since_update = 0
-        return sum(max(0.0, d - CAPSENSE_NOISE_K * n)
-                   for d, n in zip(channel_deltas, self._cap_noise))
+        excess = [max(0.0, d - CAPSENSE_NOISE_K * n)
+                  for d, n in zip(channel_deltas, self._cap_noise)]
+        if values is not None and any(excess):
+            earlier = list(self._cap_levels)[:-1]
+            for i, e in enumerate(excess):
+                margin = CAPSENSE_NOISE_K * self._cap_noise[i]
+                if e and any(abs(values[i] - lv[i]) <= margin for lv in earlier):
+                    excess[i] = 0.0
+        return sum(excess)
 
     def commit(self, ts: float, present: Optional[bool], delta: float) -> bool:
         """Advance the session with one sample's presence and movement.
