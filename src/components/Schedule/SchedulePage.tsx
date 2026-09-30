@@ -24,6 +24,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ScheduleToggle } from './ScheduleToggle'
 import { SchedulerConfirmation } from './SchedulerConfirmation'
 import { AlarmSection } from './AlarmSection'
+import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 
 interface EditingCurve {
   days: DayOfWeek[]
@@ -36,8 +37,11 @@ interface EditingCurve {
  * in the context column. Creating/editing a curve swaps in `CurveEditor`.
  */
 export function SchedulePage() {
-  // One side away: selectedSide is that sleeper's side and the switch is hidden.
-  const { primarySide: side, selectedSide, selectSide, singleSleeperSide } = useSide()
+  // One side away: the page is that sleeper's schedule (the away side follows
+  // it on the pod) and the switch is hidden.
+  const { primarySide, selectedSide: chosenSide, selectSide, singleSleeperSide } = useSide()
+  const side = singleSleeperSide ?? primarySide
+  const selectedSide = singleSleeperSide ?? chosenSide
   const {
     confirmMessage,
     isPowerEnabled,
@@ -182,7 +186,7 @@ export function SchedulePage() {
       <PageHeader
         title="Schedule"
         middle={singleSleeperSide
-          ? undefined
+          ? <AwayNote className="hidden min-[900px]:inline" />
           : (
               <div className="hidden min-[900px]:block">
                 <SegmentedControl ariaLabel="Side" options={sideOptions} value={selectedSide} onChange={selectSide} />
@@ -202,6 +206,7 @@ export function SchedulePage() {
         )}
       />
 
+      <AwayNote className="min-[900px]:hidden" />
       {!singleSleeperSide && (
         <SegmentedControl
           full

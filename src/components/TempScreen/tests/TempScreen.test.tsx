@@ -42,6 +42,7 @@ vi.mock('@/src/hooks/useDeviceStatus', () => ({
 }))
 vi.mock('@/src/providers/SideProvider', () => ({
   useSide: () => ({ ...m.side, toggleLink: m.toggleLink, selectedSide: m.side.isLinked ? 'both' : m.side.primarySide }),
+  useShownSides: () => (m.side.singleSleeperSide ? [m.side.singleSleeperSide] : ['left', 'right']),
 }))
 vi.mock('@/src/providers/PrefsProvider', () => ({ usePrefs: () => ({ control: m.control, tempDisplay: m.display }) }))
 vi.mock('@/src/hooks/useSideNames', () => ({
@@ -147,17 +148,16 @@ describe('TempScreen', () => {
     expect(screen.queryByText(/Out of bed/)).toBeNull()
   })
 
-  it('shows one card for the sleeper when the other side is away', () => {
-    m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: 'left' }
+  it('keeps both cards, linked, when one side is away', () => {
+    m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: 'left' }
     const screen = render(<TempScreen />)
-    expect(screen.queryByRole('group', { name: 'Heidi (right)' })).toBeNull()
-    expect(card(screen, 'Jon (left)').getAllByText('In bed').length).toBeGreaterThan(0)
-    expect(screen.queryByText(/^Left ·/)).toBeNull()
-    expect(screen.queryByRole('button', { name: /Link sides|Sides linked/ })).toBeNull()
+    expect(card(screen, 'Jon (left)')).toBeTruthy()
+    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'Sides linked' })).toBeTruthy()
+    // The sleeper's schedule and timeline.
     expect(m.timelineSides).toEqual(['left'])
-    // Live control drives both halves of the bed.
-    tap(card(screen, 'Jon (left)').getByRole('button', { name: 'Warmer' }))
-    expect(m.setTemp.mock.calls.map(c => c[0])).toEqual([{ side: 'left', temperature: 77 }, { side: 'right', temperature: 77 }])
+    tap(card(screen, 'Heidi (right)').getByRole('button', { name: 'Warmer' }))
+    expect(m.setTemp.mock.calls.map(c => c[0])).toEqual([{ side: 'left', temperature: 83 }, { side: 'right', temperature: 83 }])
   })
 
   it('shows both cards and the link button otherwise', () => {
@@ -315,12 +315,12 @@ describe('TempScreen', () => {
       expect(m.setTemp).not.toHaveBeenCalled()
     })
 
-    it('edits Night on the sleeper\'s schedule only when the other side is away', () => {
-      m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: 'left' }
+    it('edits Night on the sleeper\'s schedule only when the other side is away, from either card', () => {
+      m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: 'left' }
       const screen = render(<TempScreen />)
-      const left = card(screen, 'Jon (left)')
-      fireEvent.click(left.getByRole('tab', { name: /Night/ }))
-      fireEvent.click(left.getByRole('button', { name: 'Cooler night' }))
+      const right = card(screen, 'Heidi (right)')
+      fireEvent.click(right.getByRole('tab', { name: /Night/ }))
+      fireEvent.click(right.getByRole('button', { name: 'Cooler night' }))
       expect(m.nudge.left).toHaveBeenCalledExactlyOnceWith('night', -1)
       expect(m.nudge.right).not.toHaveBeenCalled()
     })

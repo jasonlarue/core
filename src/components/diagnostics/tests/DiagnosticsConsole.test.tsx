@@ -92,7 +92,11 @@ const side = (s: 'left' | 'right', over: Record<string, unknown> = {}) => ({
 const single = vi.hoisted(() => ({ sides: null as null | Array<'left' | 'right'> }))
 vi.mock('@/src/providers/SideProvider', async (importOriginal) => {
   const actual = await importOriginal<typeof SideProviderModule>()
-  return { ...actual, useShownSides: () => single.sides ?? actual.useShownSides() }
+  return {
+    ...actual,
+    useShownSides: () => single.sides ?? actual.useShownSides(),
+    useSingleSleeperSide: () => single.sides?.[0] ?? actual.useSingleSleeperSide(),
+  }
 })
 
 beforeEach(() => {
@@ -212,6 +216,7 @@ describe('DiagnosticsConsole dashboard', () => {
       expect(screen.queryByTestId('tonight-right')).toBeNull()
       expect(screen.getByTestId('side-left')).toBeTruthy()
       expect(screen.queryByTestId('side-right')).toBeNull()
+      expect(screen.getByTestId('away-note').textContent).toBe('Right side set to away')
     }
     finally {
       single.sides = null

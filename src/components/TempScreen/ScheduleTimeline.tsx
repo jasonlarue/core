@@ -39,7 +39,7 @@ const nightDate = (d: Date) => d.toLocaleDateString('en-US', { weekday: 'short',
  * Wires into schedules.getAll, biometrics.getSleepRecords and
  * health.thermalHistory (24h).
  */
-export function ScheduleTimeline({ unit, className, sides = SIDES }: { unit: TempUnit, className?: string, sides?: Side[] }) {
+export function ScheduleTimeline({ unit, className, sides = SIDES }: { unit: TempUnit, className?: string, sides?: readonly Side[] }) {
   const lang = langFromPath(usePathname())
   const nowMinute = useNowMinute()
   const win = nowMinute == null ? null : timelineWindow(new Date(nowMinute * 60_000))
@@ -65,7 +65,7 @@ export function ScheduleTimeline({ unit, className, sides = SIDES }: { unit: Tem
   )
 }
 
-function TimelineBody({ win, now, unit, sides }: { win: TimelineWindow, now: number, unit: TempUnit, sides: Side[] }) {
+function TimelineBody({ win, now, unit, sides }: { win: TimelineWindow, now: number, unit: TempUnit, sides: readonly Side[] }) {
   const span = win.end - win.start
   const pct = (t: number) => ((t - win.start) / span) * 100
   const ticks: number[] = []
