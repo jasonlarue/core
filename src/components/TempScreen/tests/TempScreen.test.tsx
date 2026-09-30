@@ -155,8 +155,9 @@ describe('TempScreen', () => {
     expect(screen.queryByText(/^Left ·/)).toBeNull()
     expect(screen.queryByRole('button', { name: /Link sides|Sides linked/ })).toBeNull()
     expect(m.timelineSides).toEqual(['left'])
+    // Live control drives both halves of the bed.
     tap(card(screen, 'Jon (left)').getByRole('button', { name: 'Warmer' }))
-    expect(m.setTemp).toHaveBeenCalledExactlyOnceWith({ side: 'left', temperature: 77 }, expect.anything())
+    expect(m.setTemp.mock.calls.map(c => c[0])).toEqual([{ side: 'left', temperature: 77 }, { side: 'right', temperature: 77 }])
   })
 
   it('shows both cards and the link button otherwise', () => {
@@ -312,6 +313,16 @@ describe('TempScreen', () => {
       expect(m.nudge.left).toHaveBeenCalledExactlyOnceWith('night', -1)
       expect(m.nudge.right).toHaveBeenCalledExactlyOnceWith('night', -1)
       expect(m.setTemp).not.toHaveBeenCalled()
+    })
+
+    it('edits Night on the sleeper\'s schedule only when the other side is away', () => {
+      m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: 'left' }
+      const screen = render(<TempScreen />)
+      const left = card(screen, 'Jon (left)')
+      fireEvent.click(left.getByRole('tab', { name: /Night/ }))
+      fireEvent.click(left.getByRole('button', { name: 'Cooler night' }))
+      expect(m.nudge.left).toHaveBeenCalledExactlyOnceWith('night', -1)
+      expect(m.nudge.right).not.toHaveBeenCalled()
     })
 
     it('steps Now by an Eight Sleep level in level display', () => {
