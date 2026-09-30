@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as SideProviderModule from '@/src/providers/SideProvider'
 import type * as CurveChartModule from '@/src/components/Schedule/CurveChart'
 
 const mocks = vi.hoisted(() => ({
@@ -88,9 +89,20 @@ const side = (s: 'left' | 'right', over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
+const single = vi.hoisted(() => ({ sides: null as null | Array<'left' | 'right'> }))
+vi.mock('@/src/providers/SideProvider', async (importOriginal) => {
+  const actual = await importOriginal<typeof SideProviderModule>()
+  return {
+    ...actual,
+    useShownSides: () => single.sides ?? actual.useShownSides(),
+    useSingleSleeperSide: () => single.sides?.[0] ?? actual.useSingleSleeperSide(),
+  }
+})
+
 beforeEach(() => {
   mocks.thermal = {
     pumpStallProtectionEnabled: true,
+    reportsPumpSpeed: true,
     heatsinkTempF: 94.2,
     ambientTempF: 76,
     sides: [side('left'), side('right', { targetTempF: 82, currentTempF: 81 })],
@@ -196,6 +208,21 @@ describe('DiagnosticsConsole dashboard', () => {
     expect(mocks.mutations['device.startPriming']).toHaveBeenCalledWith({})
   })
 
+  it('shows only the sleeper\'s side when the other is away', () => {
+    single.sides = ['left']
+    try {
+      render(<DiagnosticsConsole section="dashboard" onJump={vi.fn()} />)
+      expect(screen.getByTestId('tonight-left')).toBeTruthy()
+      expect(screen.queryByTestId('tonight-right')).toBeNull()
+      expect(screen.getByTestId('side-left')).toBeTruthy()
+      expect(screen.queryByTestId('side-right')).toBeNull()
+      expect(screen.getByTestId('away-note').textContent).toBe('Right side set to away')
+    }
+    finally {
+      single.sides = null
+    }
+  })
+
   it('plans tonight with curves per side, pod job markers and a now line', () => {
     const onJump = vi.fn()
     render(<DiagnosticsConsole section="dashboard" onJump={onJump} />)
@@ -276,6 +303,12 @@ describe('DiagnosticsConsole thermal history', () => {
   })
 
   it('hides the warning when protection is on', () => {
+    render(<DiagnosticsConsole section="thermal" onJump={vi.fn()} />)
+    expect(screen.queryByText('Pump-stall protection off')).toBeNull()
+  })
+
+  it('hides the warning on a pod that reports no pump speed', () => {
+    mocks.thermal = { ...(mocks.thermal as object), pumpStallProtectionEnabled: false, reportsPumpSpeed: false }
     render(<DiagnosticsConsole section="thermal" onJump={vi.fn()} />)
     expect(screen.queryByText('Pump-stall protection off')).toBeNull()
   })
