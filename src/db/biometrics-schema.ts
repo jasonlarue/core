@@ -1,4 +1,11 @@
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import type {
+  ReferenceBeatSeries,
+  ReferenceHeartRate,
+  ReferenceHrv,
+  ReferenceRespiratoryRate,
+  ReferenceStage,
+} from '@/src/lib/sleepStaging/referenceNight'
 
 /**
  * Biometrics database schema — lives in biometrics.db, separate from the
@@ -45,6 +52,33 @@ export const heartbeats = sqliteTable('heartbeats', {
   uniqueIndex('uq_heartbeats_side_timestamp').on(t.side, t.timestamp),
   // See idx_vitals_timestamp — retention pruning needs a timestamp seek.
   index('idx_heartbeats_timestamp').on(t.timestamp),
+])
+
+// A night recorded by a reference device (an Apple Watch, synced by the iOS
+// app from HealthKit) that the pod's own tracking is scored against — see
+// docs/sleep-tracking-plan.md (A0) and src/lib/sleepStaging/referenceNight.ts.
+// One row per side per night: an upload replaces any stored night for the
+// same side that overlaps it. Times inside the JSON payloads are unix ms on
+// the reference clock; clock_offset_ms (pod receive − phone send) maps them
+// onto the pod's. Not pruned by retention: rows are small and are the
+// evaluation set.
+export const referenceNights = sqliteTable('reference_nights', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  side: text('side', { enum: ['left', 'right'] }).notNull(),
+  source: text('source', { enum: ['apple-watch'] }).notNull(),
+  deviceModel: text('device_model'), // e.g. 'Watch7,1'
+  podVersion: text('pod_version'), // DAC podVersion at upload, null if unknown
+  nightStart: integer('night_start', { mode: 'timestamp' }).notNull(), // reference clock
+  nightEnd: integer('night_end', { mode: 'timestamp' }).notNull(),
+  stages: text('stages', { mode: 'json' }).notNull().$type<ReferenceStage[]>(),
+  heartRate: text('heart_rate', { mode: 'json' }).notNull().$type<ReferenceHeartRate[]>(),
+  hrv: text('hrv', { mode: 'json' }).notNull().$type<ReferenceHrv[]>(),
+  beatSeries: text('beat_series', { mode: 'json' }).notNull().$type<ReferenceBeatSeries[]>(),
+  respiratoryRate: text('respiratory_rate', { mode: 'json' }).notNull().$type<ReferenceRespiratoryRate[]>(),
+  clockOffsetMs: integer('clock_offset_ms').notNull(),
+  uploadedAt: integer('uploaded_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+}, t => [
+  index('idx_reference_nights_side_start').on(t.side, t.nightStart),
 ])
 
 export const sleepRecords = sqliteTable('sleep_records', {

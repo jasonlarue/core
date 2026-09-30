@@ -18,10 +18,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { formatKeepList, KEEP_PAD_AFTER_MS } from '@/src/lib/rawKeepList'
 
 const helperPath = resolve('scripts/lib/biometrics-archiver-helpers')
 const archiverScript = resolve('modules/biometrics-archiver/sleepypod-biometrics-archiver')
 const linkerScript = resolve('modules/biometrics-archiver/sleepypod-biometrics-linker')
+const prunerScript = resolve('modules/biometrics-archiver/sleepypod-biometrics-pruner')
 
 let root: string
 let tmpfsDir: string
@@ -280,6 +282,21 @@ describe('sleepypod-biometrics-archiver', () => {
     expect(pendingEntries()).toEqual([])
   })
 
+  it('carries the last-write time of the frame onto the archive', () => {
+    // The pruner's keep-list matches frames to replay windows by archive
+    // mtime, so it has to be the frame's end, not the time gzip ran.
+    const live = writeRaw('0016B64F.RAW', 'waveform bytes')
+    runLinker()
+    const frameEnd = new Date(1_700_000_000_000)
+    utimesSync(join(pendingDir, '0016B64F.RAW'), frameEnd, frameEnd)
+    rmSync(live)
+
+    const result = runArchiver()
+
+    expect(result.status).toBe(0)
+    expect(statSync(join(archiveDir, '0016B64F.RAW.gz')).mtimeMs).toBe(frameEnd.getTime())
+  })
+
   it('leaves a pinned frame alone while the firmware still holds the live file', () => {
     writeRaw()
     runLinker()
@@ -466,5 +483,132 @@ describe.each(['remove_biometrics_archiver_for_nats', 'remove_biometrics_archive
     expect(result.stderr).toContain('is still mounted')
     expect(existsSync(mountUnit)).toBe(true)
     expect(existsSync(recoveryTool)).toBe(true)
+  })
+})
+
+describe('sleepypod-biometrics-pruner', () => {
+  let keepList: string
+
+  /** gzipped archive with a fixed mtime (seconds since epoch). */
+  function writeArchive(name: string, mtimeSec: number): string {
+    const path = join(archiveDir, name)
+    writeFileSync(path, gzipSync('frame'))
+    utimesSync(path, mtimeSec, mtimeSec)
+    return path
+  }
+
+  function archives(): string[] {
+    return readdirSync(archiveDir).filter(f => f.endsWith('.RAW.gz')).sort()
+  }
+
+  /** Run the real pruner; df reports 30% used per archive left, so a 80% target keeps two. */
+  function runPruner(extraEnv: Partial<NodeJS.ProcessEnv> = {}) {
+    return spawnSync('/bin/bash', [prunerScript], {
+      encoding: 'utf8',
+      env: scriptEnv({ KEEP_LIST: keepList, TARGET_USED_PCT: '80', ...extraEnv }),
+    })
+  }
+
+  beforeEach(() => {
+    keepList = join(archiveDir, 'keep.list')
+    writeExecutable(join(stubBinDir, 'df'), [
+      '#!/usr/bin/env bash',
+      'n=$(ls "$ARCHIVE_DIR"/*.RAW.gz 2>/dev/null | wc -l)',
+      'echo "Filesystem 1024-blocks Used Available Capacity Mounted-on"',
+      'echo "mmc 100 0 100 $((n * 30))% /persistent"',
+    ])
+  })
+
+  it('prunes oldest first until usage is under target', () => {
+    writeArchive('00000004.RAW.gz', 4000)
+    writeArchive('00000001.RAW.gz', 1000)
+    writeArchive('00000003.RAW.gz', 3000)
+    writeArchive('00000002.RAW.gz', 2000)
+
+    const result = runPruner()
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('pruned=2')
+    expect(archives()).toEqual(['00000003.RAW.gz', '00000004.RAW.gz'])
+  })
+
+  it('prunes every unkept frame before any kept one', () => {
+    writeArchive('00000001.RAW.gz', 1000)
+    writeArchive('00000002.RAW.gz', 2000)
+    writeArchive('00000003.RAW.gz', 3000)
+    writeArchive('00000004.RAW.gz', 4000)
+    writeFileSync(keepList, '# comment\n900 2100\n')
+
+    const result = runPruner()
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('pruned=2')
+    expect(archives()).toEqual(['00000001.RAW.gz', '00000002.RAW.gz'])
+    expect(result.stderr).not.toContain('kept frame')
+  })
+
+  it('prunes kept frames oldest first when only kept frames are left over target', () => {
+    for (const [i, t] of [1000, 2000, 3000, 4000].entries()) writeArchive(`0000000${i + 1}.RAW.gz`, t)
+    writeFileSync(keepList, '0 5000\n')
+
+    const result = runPruner()
+
+    expect(result.status).toBe(0)
+    expect(archives()).toEqual(['00000003.RAW.gz', '00000004.RAW.gz'])
+    expect(result.stderr).toContain('pruned 2 kept frame(s)')
+  })
+
+  it('matches a frame against any of several windows, bounds inclusive', () => {
+    writeArchive('00000001.RAW.gz', 1000)
+    writeArchive('00000002.RAW.gz', 2000)
+    writeArchive('00000003.RAW.gz', 3000)
+    writeArchive('00000004.RAW.gz', 4000)
+    writeFileSync(keepList, '1000 1000\n4000 4500\n')
+
+    runPruner()
+
+    expect(archives()).toEqual(['00000001.RAW.gz', '00000004.RAW.gz'])
+  })
+
+  it('keeps the frames of a window written by rawKeepList', () => {
+    // End to end with the server's writer: a frame ending inside the padded
+    // window survives, one ending after it doesn't.
+    const nightEndMs = 2_000_000_000
+    writeFileSync(keepList, formatKeepList([{ start: nightEndMs - 8 * 3_600_000, end: nightEndMs }]))
+    const inside = Math.floor((nightEndMs + KEEP_PAD_AFTER_MS) / 1000) - 60
+    const after = Math.ceil((nightEndMs + KEEP_PAD_AFTER_MS) / 1000) + 60
+    writeArchive('00000001.RAW.gz', inside - 3600)
+    writeArchive('00000002.RAW.gz', inside)
+    writeArchive('00000003.RAW.gz', after)
+    writeArchive('00000004.RAW.gz', after + 60)
+
+    runPruner()
+
+    expect(archives()).toEqual(['00000001.RAW.gz', '00000002.RAW.gz'])
+  })
+
+  it('prunes normally without a keep-list', () => {
+    writeArchive('00000001.RAW.gz', 1000)
+    writeArchive('00000002.RAW.gz', 2000)
+    writeArchive('00000003.RAW.gz', 3000)
+
+    const result = runPruner()
+
+    expect(result.status).toBe(0)
+    expect(archives()).toEqual(['00000002.RAW.gz', '00000003.RAW.gz'])
+  })
+
+  it('reports an empty archive when over target with nothing to prune', () => {
+    writeExecutable(join(stubBinDir, 'df'), [
+      '#!/usr/bin/env bash',
+      'echo "Filesystem 1024-blocks Used Available Capacity Mounted-on"',
+      'echo "mmc 100 95 5 95% /persistent"',
+    ])
+
+    const result = runPruner()
+
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('archive is empty')
+    expect(result.stdout).toContain('pruned=0')
   })
 })

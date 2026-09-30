@@ -2,10 +2,10 @@ import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
 import { publicProcedure, router } from '@/src/server/trpc'
 import { biometricsDb, db } from '@/src/db'
-import { sleepRecords, vitals, movement, heartbeats } from '@/src/db/biometrics-schema'
+import { sleepRecords, vitals, movement, heartbeats, referenceNights } from '@/src/db/biometrics-schema'
 import { deviceSettings, sideSettings } from '@/src/db/schema'
 import { stageNight } from '@/src/lib/sleepStaging/stageNight'
-import { eq, and, gte, lte, desc, asc, avg, min, max, count, sql } from 'drizzle-orm'
+import { eq, and, gte, lte, desc, asc, avg, min, max, count, sql, inArray } from 'drizzle-orm'
 import { sideSchema, idSchema, validateDateRange } from '@/src/server/validation-schemas'
 import { listRawFiles } from './raw'
 import {
@@ -21,6 +21,18 @@ import {
   pickMinBucketNonStillEpochs,
 } from '@/src/lib/movement'
 import { getOccupancy } from '@/src/lib/occupancy'
+import { getDacMonitorIfRunning } from '@/src/hardware/dacMonitor.instance'
+import { RAW_KEEP_NIGHTS, writeKeepList } from '@/src/lib/rawKeepList'
+import {
+  referenceNightInputSchema,
+  referenceStageSchema,
+  referenceHeartRateSchema,
+  referenceHrvSchema,
+  referenceBeatSeriesSchema,
+  referenceRespiratoryRateSchema,
+  rowToReferenceNight,
+  type ReferenceNight,
+} from '@/src/lib/sleepStaging/referenceNight'
 
 /**
  * SQL fragment: movement.timestamp falls inside an existing sleep_records
@@ -39,6 +51,49 @@ function inBedExists(side: 'left' | 'right') {
       AND ${movement.timestamp} <= COALESCE(${sleepRecords.leftBedAt}, 99999999999)
   )`
 }
+
+/**
+ * Rewrite the raw-archive keep-list from the most recent reference nights so
+ * the archive pruner deletes their frames last (src/lib/rawKeepList.ts).
+ * Windows are moved onto the pod's clock, which is what archive mtimes use.
+ * Best effort: a failure here must not fail the upload that triggered it.
+ */
+async function refreshRawKeepList(): Promise<void> {
+  try {
+    const rows = await biometricsDb
+      .select({
+        nightStart: referenceNights.nightStart,
+        nightEnd: referenceNights.nightEnd,
+        clockOffsetMs: referenceNights.clockOffsetMs,
+      })
+      .from(referenceNights)
+      .orderBy(desc(referenceNights.nightEnd))
+      .limit(RAW_KEEP_NIGHTS)
+    writeKeepList(rows.map(r => ({
+      start: r.nightStart.getTime() + r.clockOffsetMs,
+      end: r.nightEnd.getTime() + r.clockOffsetMs,
+    })))
+  }
+  catch (error) {
+    console.warn('[biometrics] failed to refresh raw keep-list:', error instanceof Error ? error.message : error)
+  }
+}
+
+const referenceNightOutputSchema = z.object({
+  id: z.number(),
+  side: sideSchema,
+  source: z.literal('apple-watch'),
+  deviceModel: z.string().nullable(),
+  podVersion: z.string().nullable(),
+  nightStart: z.number(),
+  nightEnd: z.number(),
+  stages: z.array(referenceStageSchema),
+  heartRate: z.array(referenceHeartRateSchema),
+  hrv: z.array(referenceHrvSchema),
+  beatSeries: z.array(referenceBeatSeriesSchema),
+  respiratoryRate: z.array(referenceRespiratoryRateSchema),
+  clockOffsetMs: z.number(),
+})
 
 /**
  * Biometrics router - query sleep and health data collected by Pod sensors.
@@ -1257,6 +1312,147 @@ export const biometricsRouter = router({
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message: `Failed to classify sleep stages: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          cause: error,
+        })
+      }
+    }),
+  /**
+   * Store a night recorded by a reference device — an Apple Watch, synced by
+   * the iOS app from HealthKit — to score the pod's own tracking against
+   * (docs/sleep-tracking-plan.md, A0).
+   *
+   * - Replaces any stored night for the same side that overlaps this one, so
+   *   re-syncing an edited night never duplicates it.
+   * - Records the clock offset (pod receive time − phone send time): the pod
+   *   may have no NTP while WAN is blocked.
+   * - Refreshes the raw-archive keep-list so the night stays replayable.
+   */
+  reportReferenceNight: publicProcedure
+    .meta({ openapi: { method: 'POST', path: '/biometrics/reference-nights', protect: false, tags: ['Biometrics'] } })
+    .input(referenceNightInputSchema)
+    .output(z.object({ id: z.number(), replaced: z.number(), clockOffsetMs: z.number() }))
+    .mutation(async ({ input }) => {
+      try {
+        const clockOffsetMs = Date.now() - input.sentAt
+        const podVersion = getDacMonitorIfRunning()?.getLastStatus()?.podVersion ?? null
+        const nightStart = new Date(input.nightStart)
+        const nightEnd = new Date(input.nightEnd)
+
+        const result = biometricsDb.transaction((tx) => {
+          const overlapping = tx
+            .select({ id: referenceNights.id })
+            .from(referenceNights)
+            .where(
+              and(
+                eq(referenceNights.side, input.side),
+                lte(referenceNights.nightStart, nightEnd),
+                gte(referenceNights.nightEnd, nightStart),
+              )
+            )
+            .all()
+          if (overlapping.length > 0) {
+            tx.delete(referenceNights)
+              .where(inArray(referenceNights.id, overlapping.map(r => r.id)))
+              .run()
+          }
+          const [row] = tx
+            .insert(referenceNights)
+            .values({
+              side: input.side,
+              source: input.source,
+              deviceModel: input.deviceModel ?? null,
+              podVersion,
+              nightStart,
+              nightEnd,
+              stages: input.stages,
+              heartRate: input.heartRate,
+              hrv: input.hrv,
+              beatSeries: input.beatSeries,
+              respiratoryRate: input.respiratoryRate,
+              clockOffsetMs,
+            })
+            .returning({ id: referenceNights.id })
+            .all()
+          return { id: row.id, replaced: overlapping.length }
+        })
+
+        await refreshRawKeepList()
+        return { ...result, clockOffsetMs }
+      }
+      catch (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to store reference night: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          cause: error,
+        })
+      }
+    }),
+
+  /**
+   * Stored reference nights, most recent first. Filters on the night's start
+   * (reference clock); times in the payloads are reference-clock unix ms —
+   * add clockOffsetMs to put them on the pod's clock.
+   */
+  getReferenceNights: publicProcedure
+    .meta({ openapi: { method: 'GET', path: '/biometrics/reference-nights', protect: false, tags: ['Biometrics'] } })
+    .input(
+      z.object({
+        side: sideSchema.optional(),
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        limit: z.number().int().min(1).max(100).default(14),
+      }).strict()
+    )
+    .output(z.array(referenceNightOutputSchema))
+    .query(async ({ input }): Promise<ReferenceNight[]> => {
+      try {
+        if (input.startDate && input.endDate && !validateDateRange(input.startDate, input.endDate)) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'startDate must be before or equal to endDate' })
+        }
+        const conditions = []
+        if (input.side) conditions.push(eq(referenceNights.side, input.side))
+        if (input.startDate) conditions.push(gte(referenceNights.nightStart, input.startDate))
+        if (input.endDate) conditions.push(lte(referenceNights.nightStart, input.endDate))
+
+        const rows = await biometricsDb
+          .select()
+          .from(referenceNights)
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
+          .orderBy(desc(referenceNights.nightStart))
+          .limit(input.limit)
+        return rows.map(rowToReferenceNight)
+      }
+      catch (error) {
+        if (error instanceof TRPCError) throw error
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to fetch reference nights: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          cause: error,
+        })
+      }
+    }),
+
+  /**
+   * Delete stored reference nights — one side's, or all of them — e.g. when
+   * the sleeper turns Apple Watch sharing off. Refreshes the keep-list.
+   */
+  deleteReferenceNights: publicProcedure
+    .meta({ openapi: { method: 'POST', path: '/biometrics/reference-nights/delete', protect: false, tags: ['Biometrics'] } })
+    .input(z.object({ side: sideSchema.optional() }).strict())
+    .output(z.object({ deleted: z.number() }))
+    .mutation(async ({ input }) => {
+      try {
+        const deleted = await biometricsDb
+          .delete(referenceNights)
+          .where(input.side ? eq(referenceNights.side, input.side) : undefined)
+          .returning({ id: referenceNights.id })
+        await refreshRawKeepList()
+        return { deleted: deleted.length }
+      }
+      catch (error) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to delete reference nights: ${error instanceof Error ? error.message : 'Unknown error'}`,
           cause: error,
         })
       }

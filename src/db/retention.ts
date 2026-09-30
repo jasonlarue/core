@@ -35,6 +35,8 @@ import {
  *   sleep_records     — derived summaries, low volume, keep indefinitely
  *   water_level_alerts — user-facing events, low volume, keep indefinitely
  *   calibration_*     — small, correctness-critical, keep indefinitely
+ *   reference_nights  — Apple Watch nights for scoring the pod's tracking;
+ *                       one small row per night, the evaluation set
  */
 
 const RETENTION_TABLES = [

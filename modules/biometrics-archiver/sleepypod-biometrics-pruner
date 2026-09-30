@@ -2,9 +2,15 @@
 # Prune oldest gzipped RAW archives until /persistent disk usage falls
 # below TARGET_USED_PCT. Runs every 15 min after archiver. Never touches
 # files outside /persistent/biometrics-archive/.
+#
+# Frames inside a window listed in $KEEP_LIST (nights that have a reference
+# recording, written by sleepypod-core — src/lib/rawKeepList.ts) go last:
+# every other archive is pruned first, oldest first. Disk safety still wins —
+# if only kept frames remain and usage is over target, they are pruned too.
 set -euo pipefail
 
-ARCHIVE_DIR="/persistent/biometrics-archive"
+ARCHIVE_DIR="${ARCHIVE_DIR:-/persistent/biometrics-archive}"
+KEEP_LIST="${KEEP_LIST:-$ARCHIVE_DIR/keep.list}"
 TARGET_USED_PCT="${TARGET_USED_PCT:-80}"
 
 mkdir -p "$ARCHIVE_DIR"
@@ -21,27 +27,54 @@ disk_used_pct() {
   echo "${pct:-0}"
 }
 
+# Archives in prune order, one per line: "<kept 0|1> <mtime> <path>" —
+# unkept before kept, oldest first within each. `stat -c` and `sort -k` are
+# busybox-safe (the old `find -printf` is GNU-only and silently no-ops on
+# busybox find). Keep windows are passed to awk as "start end start end …".
+prune_order() {
+  local windows=""
+  if [ -f "$KEEP_LIST" ]; then
+    windows=$(grep -v '^#' "$KEEP_LIST" | tr '\n' ' ' || true)
+  fi
+  stat -c '%Y %n' "$ARCHIVE_DIR"/*.RAW.gz 2>/dev/null \
+    | awk -v w="$windows" '
+        BEGIN { n = split(w, a, " "); m = 0; for (i = 1; i + 1 <= n; i += 2) { s[++m] = a[i]; e[m] = a[i + 1] } }
+        { k = 0; for (i = 1; i <= m; i++) if ($1 + 0 >= s[i] + 0 && $1 + 0 <= e[i] + 0) { k = 1; break }; print k, $0 }' \
+    | sort -k1,1n -k2,2n -k3,3
+}
+
 pruned=0
+kept_pruned=0
+order=$(prune_order || true)
 while :; do
   used_pct=$(disk_used_pct)
   if [ "$used_pct" -le "$TARGET_USED_PCT" ]; then
     break
   fi
 
-  # Oldest archive by mtime. `ls -tr` (mtime order, oldest first) is
-  # busybox-safe; the old `find -printf` is GNU-only and silently no-ops on
-  # busybox find. `awk NR==1` rather than `head -1` consumes the whole stream —
-  # `head` closes the pipe early and, under `set -o pipefail`, aborts the
-  # script on SIGPIPE so it never prunes (archive grows unbounded, /persistent
-  # fills past target).
-  oldest=$(ls -1tr "$ARCHIVE_DIR"/*.RAW.gz 2>/dev/null | awk 'NR==1')
-  if [ -z "$oldest" ]; then
+  if [ -z "$order" ]; then
     echo "pruner: $used_pct% used but archive is empty — nothing to prune" >&2
     break
   fi
 
-  rm -f "$oldest"
+  # Pop the first entry. `awk NR==1` rather than `head -1` consumes the whole
+  # stream — `head` closes the pipe early and, under `set -o pipefail`, aborts
+  # the script on SIGPIPE so it never prunes (archive grows unbounded,
+  # /persistent fills past target).
+  entry=$(printf '%s\n' "$order" | awk 'NR==1')
+  order=$(printf '%s\n' "$order" | awk 'NR>1')
+  kept=${entry%% *}
+  victim=${entry#* }
+  victim=${victim#* }
+
+  rm -f "$victim"
   pruned=$((pruned + 1))
+  if [ "$kept" = "1" ]; then
+    kept_pruned=$((kept_pruned + 1))
+  fi
 done
 
+if [ "$kept_pruned" -gt 0 ]; then
+  echo "pruner: pruned $kept_pruned kept frame(s) — only kept frames were left over target" >&2
+fi
 echo "pruner: pruned=$pruned used_pct=$(disk_used_pct)%"

@@ -50,6 +50,9 @@ archive_one() {
 
   tmp="$dst.tmp.$$"
   if gzip -"$GZIP_LEVEL" -c "$src" > "$tmp"; then
+    # Carry the frame's last-write time (its end) onto the archive: the
+    # pruner's keep-list matches frames to replay windows by archive mtime.
+    touch -r "$src" "$tmp" 2>/dev/null || true
     mv -f "$tmp" "$dst"
     rm -f "$src"
     archived=$((archived + 1))
