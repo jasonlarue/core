@@ -90,6 +90,8 @@ export function NightView({ side, weekStart, isCurrentWeek, nightKey, onSelectNi
       exits: record?.timesExitedBed ?? records.find(r => r.id === id)?.timesExitedBed ?? null,
       quality: epochs.length > 0 ? stages?.qualityScore ?? null : null,
       distribution: stages?.distribution,
+      method: stages?.method,
+      fallbackReason: stages?.fallbackReason ?? null,
       date: key && record ? keyToDate(key) : start != null ? keyToDate(toNightKey(new Date(start))) : key ? keyToDate(key) : null,
       hr: downsample(epochs.map(e => e.heartRate)),
       avgHr: average(epochs.map(e => e.heartRate)),
@@ -188,6 +190,8 @@ interface Night {
   asleepSeconds: number | null
   quality: number | null
   distribution?: { wake: number, rem: number, light: number, deep: number }
+  method?: 'model' | 'rules'
+  fallbackReason: 'profile' | 'coverage' | null
   date: Date | null
 }
 
@@ -266,6 +270,7 @@ function NightCard({ night, error, empty }: { night: Night, error: string | null
               <div className="min-[900px]:hidden">
                 <NightHypnogram blocks={night.blocks} lane={18} bar={12} labels={false} />
               </div>
+              <StagingMethodNote method={night.method} reason={night.fallbackReason} />
             </>
           )
         : <EmptyNote className="py-6">Not enough vitals to classify stages for this night</EmptyNote>}
@@ -332,4 +337,18 @@ function ThisWeek({ nights, selectedKey, onSelect, loading }: {
       </div>
     </Card>
   )
+}
+
+/** How this night was staged, and what would enable the heart-rhythm model. */
+function StagingMethodNote({ method, reason }: {
+  method?: 'model' | 'rules'
+  reason: 'profile' | 'coverage' | null
+}) {
+  if (!method) return null
+  const text = method === 'model'
+    ? 'Stages from heart rhythm'
+    : reason === 'profile'
+      ? 'Set age and sex in Settings → Sides → Sleeper profile for heart-rhythm stages'
+      : 'Not enough heartbeat data this night — stages are a rough estimate from movement'
+  return <p className="text-center text-[11px] text-fg-3">{text}</p>
 }

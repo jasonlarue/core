@@ -21,6 +21,7 @@ import { markSideMutated } from '@/src/hardware/deviceStateSync'
 import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGuard'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
+import { WakeWindows, slotBefore } from './wakeWindow'
 
 const HEARTBEAT_INTERVAL_MS_DEFAULT = 60_000
 const HEARTBEAT_STALE_MS_DEFAULT = 90_000
@@ -44,6 +45,8 @@ export class JobManager {
   private readonly heartbeatIntervalMs: number
   private readonly heartbeatStaleMs: number
   private lastHeartbeatReloadAt = 0
+
+  private readonly wakeWindows = new WakeWindows()
 
   constructor(timezone: string, options: JobManagerOptions = {}) {
     this.scheduler = new Scheduler({
@@ -410,9 +413,46 @@ export class JobManager {
       `alarm-${sched.id}`,
       JobType.ALARM,
       cron,
-      () => this.runAlarmJob(sched),
+      () => this.runScheduledAlarm(sched),
       { scheduleId: sched.id, side: sched.side, targetTemperature: sched.alarmTemperature }
     )
+
+    if (sched.wakeWindow > 0) {
+      const opens = slotBefore(sched.dayOfWeek, hour, minute, sched.wakeWindow)
+      this.scheduler.scheduleJob(
+        `alarm-window-${sched.id}`,
+        JobType.WAKE_WINDOW,
+        this.buildWeeklyCron(opens.dayOfWeek, opens.hour, opens.minute),
+        async () => this.openWakeWindow(sched),
+        { scheduleId: sched.id, side: sched.side }
+      )
+      // Scheduled (or rescheduled after a reload or edit) inside the window:
+      // the window-opening job won't run until next week, so open it now.
+      this.openWakeWindow(sched)
+    }
+    else {
+      this.scheduler.cancelJob(`alarm-window-${sched.id}`)
+      this.wakeWindows.close(sched.id)
+    }
+  }
+
+  /** The set-time alarm job — skipped when movement already fired it early. */
+  async runScheduledAlarm(sched: typeof alarmSchedules.$inferSelect): Promise<void> {
+    if (this.wakeWindows.claim(sched.id)) {
+      console.log(`[jobManager] alarm-${sched.id} already fired early in its wake window`)
+      return
+    }
+    await this.runAlarmJob(sched)
+  }
+
+  /** Start watching for movement when the next alarm is within its wake window. */
+  private openWakeWindow(sched: typeof alarmSchedules.$inferSelect): void {
+    const alarmAt = this.scheduler.getNextInvocation(`alarm-${sched.id}`)
+    if (!alarmAt) return
+    // +1 min: the window-opening job fires at the top of its minute, so the
+    // alarm can read as up to a minute further away than the window.
+    if (alarmAt.getTime() - Date.now() > (sched.wakeWindow + 1) * 60_000) return
+    this.wakeWindows.open(sched.id, sched.side, alarmAt, sched.wakeWindow, () => this.runAlarmJob(sched))
   }
 
   async runAlarmJob(sched: typeof alarmSchedules.$inferSelect): Promise<void> {
@@ -884,6 +924,8 @@ export class JobManager {
 
   cancelAlarmJob(id: number): void {
     this.scheduler.cancelJob(`alarm-${id}`)
+    this.scheduler.cancelJob(`alarm-window-${id}`)
+    this.wakeWindows.close(id)
   }
 
   /**
@@ -1000,6 +1042,8 @@ export class JobManager {
         do {
           this.reloadPending = false
           this.scheduler.cancelRecurringJobs()
+          // loadSchedules reopens any window the reloaded alarms are inside.
+          this.wakeWindows.closeAll()
           await this.loadSchedules()
         } while (this.reloadPending)
       }
@@ -1217,6 +1261,7 @@ export class JobManager {
     this.shutdownRequested = true
     this.stopHeartbeat()
     this.removeEventListeners()
+    this.wakeWindows.closeAll()
     await this.scheduler.shutdown()
   }
 }

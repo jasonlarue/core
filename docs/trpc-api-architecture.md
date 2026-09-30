@@ -164,7 +164,7 @@ Device and side configuration management.
 **Procedures:**
 - `getAll()` - Fetch all settings (device + both sides + gestures)
 - `updateDevice(timezone, tempUnit, reboot, priming)` - Device-wide settings
-- `updateSide(side, name, awayMode)` - Per-side configuration
+- `updateSide(side, name, awayMode, …, age, sex)` - Per-side configuration. `age` (years, 1–120) and `sex` (`female` | `male`) are an optional sleeper profile used only as sleep-stage model inputs; `null` clears them
 - `setGesture(side, tapType, action, params)` - Configure tap behaviors
 - `deleteGesture(side, tapType)` - Remove tap gesture
 

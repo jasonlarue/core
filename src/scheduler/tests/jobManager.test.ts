@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type { WakeWindows } from '../wakeWindow'
 
 const hardwareClient = vi.hoisted(() => ({
   connect: vi.fn(async () => {}),
@@ -951,6 +952,7 @@ describe('JobManager incremental upsert/cancel', () => {
     vibrationPattern: 'rise' as const,
     duration: 120,
     alarmTemperature: 80,
+    wakeWindow: 0,
     enabled: true,
     createdAt: new Date(0),
     updatedAt: new Date(0),
@@ -1085,6 +1087,73 @@ describe('JobManager incremental upsert/cancel', () => {
     const alarmJobAfter = manager.getScheduler().getJob(`alarm-${baseAlarm.id}`)
     expect(alarmJobAfter).toBe(alarmJobBefore)
     expect(manager.getScheduler().getNextInvocation(`alarm-${baseAlarm.id}`)?.getTime()).toBe(nextBefore)
+  })
+
+  describe('wake window', () => {
+    const windows = () => (manager as unknown as { wakeWindows: WakeWindows }).wakeWindows
+    const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const
+    /** Weekly slot `minutes` from now in UTC (the manager's timezone). */
+    const inMinutes = (minutes: number) => {
+      const d = new Date(Date.now() + minutes * 60_000)
+      return { dayOfWeek: DAYS[d.getUTCDay()], time: `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}` }
+    }
+
+    it('schedules a window-opening job that many minutes before the alarm', () => {
+      manager.upsertAlarmJob({ ...baseAlarm, wakeWindow: 20 })
+      const job = manager.getScheduler().getJob('alarm-window-1')
+      expect(job?.type).toBe(JobType.WAKE_WINDOW)
+      expect(job?.schedule).toBe('40 6 * * 1')
+      expect(job?.metadata).toEqual({ scheduleId: 1, side: 'left' })
+    })
+
+    it('opens the window across midnight on the previous day', () => {
+      manager.upsertAlarmJob({ ...baseAlarm, time: '00:10', wakeWindow: 20 })
+      expect(manager.getScheduler().getJob('alarm-window-1')?.schedule).toBe('50 23 * * 0')
+    })
+
+    it('has no window job when the window is off, and drops it when turned off or cancelled', () => {
+      manager.upsertAlarmJob(baseAlarm)
+      expect(manager.getScheduler().getJob('alarm-window-1')).toBeUndefined()
+      manager.upsertAlarmJob({ ...baseAlarm, wakeWindow: 15 })
+      expect(manager.getScheduler().getJob('alarm-window-1')).toBeDefined()
+      manager.upsertAlarmJob({ ...baseAlarm, wakeWindow: 0 })
+      expect(manager.getScheduler().getJob('alarm-window-1')).toBeUndefined()
+      manager.upsertAlarmJob({ ...baseAlarm, wakeWindow: 15 })
+      manager.cancelAlarmJob(1)
+      expect(manager.getScheduler().getJob('alarm-window-1')).toBeUndefined()
+      expect(manager.getScheduler().getJob('alarm-1')).toBeUndefined()
+    })
+
+    it('starts watching right away when scheduled inside the window', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      manager.upsertAlarmJob({ ...baseAlarm, ...inMinutes(5), wakeWindow: 10 })
+      expect(windows().isOpen(1)).toBe(true)
+      manager.cancelAlarmJob(1)
+      expect(windows().isOpen(1)).toBe(false)
+    })
+
+    it('does not watch before the window opens', () => {
+      manager.upsertAlarmJob({ ...baseAlarm, ...inMinutes(30), wakeWindow: 10 })
+      expect(windows().isOpen(1)).toBe(false)
+    })
+
+    it('stops watching when the window is turned off', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      manager.upsertAlarmJob({ ...baseAlarm, ...inMinutes(5), wakeWindow: 10 })
+      manager.upsertAlarmJob({ ...baseAlarm, ...inMinutes(5), wakeWindow: 0 })
+      expect(windows().isOpen(1)).toBe(false)
+    })
+
+    it('the set-time job skips an alarm that already fired early, and fires otherwise', async () => {
+      const run = vi.spyOn(manager, 'runAlarmJob').mockResolvedValue()
+      vi.spyOn(console, 'log').mockImplementation(() => {})
+      const claim = vi.spyOn(windows(), 'claim').mockReturnValueOnce(true)
+      await manager.runScheduledAlarm(baseAlarm)
+      expect(claim).toHaveBeenCalledWith(1)
+      expect(run).not.toHaveBeenCalled()
+      await manager.runScheduledAlarm(baseAlarm)
+      expect(run).toHaveBeenCalledWith(baseAlarm)
+    })
   })
 
   it('alarm CRUD via incremental helpers completes well under the 200ms unit-test budget', () => {
@@ -1548,6 +1617,7 @@ describe('JobManager residual mutation contracts', () => {
       dayOfWeek: 'monday',
       time: '06:30',
       alarmTemperature: 88,
+      wakeWindow: 0,
       vibrationIntensity: 50,
       vibrationPattern: 'rise',
       duration: 30,
@@ -1609,6 +1679,7 @@ describe('JobManager residual mutation contracts', () => {
       dayOfWeek: 'monday',
       time: '06:30',
       alarmTemperature: 88,
+      wakeWindow: 0,
       vibrationIntensity: 50,
       vibrationPattern: 'rise',
       duration: 30,

@@ -1579,3 +1579,187 @@ def test_main_flushes_pending_vitals_during_idle_poll(monkeypatch, tmp_path, pum
 
     monkeypatch.setattr(main, "create_follower", lambda *a, **kw: IdleFollower())
     main.main()
+
+# ===================================================================
+# Beat detection wiring
+# ===================================================================
+
+
+def _hb_db():
+    import sqlite3
+    import main
+    conn = TestWriteVitalsResilience()._make_db()
+    conn.execute(
+        """CREATE TABLE heartbeats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, side TEXT, timestamp INTEGER,
+            beats TEXT, quality REAL, UNIQUE(side, timestamp))"""
+    )
+    return conn, main.DBHolder(conn)
+
+
+def _hb_rows(conn):
+    import json
+    return [(side, ts, json.loads(beats), q) for side, ts, beats, q in conn.execute(
+        "SELECT side, timestamp, beats, quality FROM heartbeats ORDER BY side, timestamp")]
+
+
+class TestHeartbeatStorage:
+    def test_write_and_ignore_replayed_minute(self):
+        import main
+        from beats import Chunk
+        conn, holder = _hb_db()
+        chunk = Chunk(1_790_000_040, [120, 1110, None, 3050], 0.8766)
+        assert main.write_heartbeats(holder, "left", chunk) is True
+        assert main.write_heartbeats(holder, "left", chunk) is True  # restart replay
+        assert _hb_rows(conn) == [("left", 1_790_000_040, [120, 1110, None, 3050], 0.877)]
+
+    def test_missing_table_is_reported_not_raised(self):
+        import main
+        from beats import Chunk
+        conn = TestWriteVitalsResilience()._make_db()
+        assert main.write_heartbeats(main.DBHolder(conn), "left", Chunk(60, [1], 0.5)) is False
+
+
+class TestBeatFrontRouting:
+    def _front(self, home):
+        import main
+        conn, holder = _hb_db()
+        return main.BeatFront(holder, _Mode(home)), conn
+
+    def test_per_side_writes_each_side(self):
+        from beats import Chunk
+        front, conn = self._front(None)
+        front._write({"left": [Chunk(60, [0, 1000], 0.9)], "right": [Chunk(60, [5, 1005], 0.7)]})
+        assert [(r[0], r[1]) for r in _hb_rows(conn)] == [("left", 60), ("right", 60)]
+
+    def test_single_sleeper_keeps_the_better_side_under_home(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        # Rolled onto the right: its chunk has more beats this minute.
+        front._write({"left": [Chunk(60, [0, None, 3000], 0.6)],
+                      "right": [Chunk(60, [0, 1000, 2000, 3000], 0.9)]})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000, 2000, 3000], 0.9)]
+
+    def test_both_trackers_get_the_other_side_as_reference(self):
+        import numpy as np
+        front, _ = self._front(None)
+        calls = {}
+        for side, tr in front.trackers.items():
+            tr.push = (lambda s: lambda ts, o1, o2, r1, r2, masked=False: calls.setdefault(s, (o1, r1)))(side)
+            tr.take_chunks = lambda *a, **k: []
+        l1, r1 = np.full(5, 1), np.full(5, 2)
+        front.push(0.0, l1, None, r1, None)
+        assert calls["left"][0] is l1 and calls["left"][1] is r1
+        assert calls["right"][0] is r1 and calls["right"][1] is l1
+
+    def _spy(self, front):
+        calls = {"left": [], "right": []}
+        for side, tr in front.trackers.items():
+            tr.push = (lambda s: lambda *a, masked=False: calls[s].append("masked" if masked else "push"))(side)
+            tr.gap = (lambda s: lambda: calls[s].append("gap"))(side)
+            tr.take_chunks = lambda *a, **k: []
+        return calls
+
+    def test_only_present_sides_are_tracked(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: s == "right")
+        calls = self._spy(front)
+        front.push(0.0, np.zeros(5), None, np.zeros(5), None)
+        assert calls == {"left": [], "right": ["push"]}
+
+    def test_leaving_the_bed_is_one_gap(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        here = {"left": True}
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: here.get(s, False))
+        calls = self._spy(front)
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None)
+        here["left"] = False
+        front.push(1.0, x, None, x, None)
+        front.push(2.0, x, None, x, None)
+        here["left"] = True
+        front.push(3.0, x, None, x, None)
+        assert calls["left"] == ["push", "gap", "push"]
+        assert calls["right"] == []
+
+    def test_a_gated_record_is_pushed_masked_not_as_a_gap(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: True)
+        calls = self._spy(front)
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None, masked=True)
+        assert calls == {"left": ["masked"], "right": ["masked"]}
+
+    def test_rate_hint_reaches_that_sides_tracker(self, monkeypatch):
+        import main
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None))
+        monkeypatch.setattr(main.time, "time", lambda: 1234.0)
+        front.set_rate_hint("right", 0.9)
+        assert (front.trackers["right"]._hint, front.trackers["right"]._hint_at) == (0.9, 1234.0)
+        assert front.trackers["left"]._hint is None
+
+    def test_empty_bed_vibration_writes_no_beats(self):
+        """A steady mechanical rhythm looks like a pulse to the detector;
+        with nobody present it must never reach the table."""
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: False)
+        t = np.arange(500) / 500.0
+        for sec in range(180):
+            hum = (4e5 * np.sin(2 * np.pi * 1.9 * (t + sec))).astype(np.int32)
+            front.push(1000.0 + sec, hum, hum, hum, hum)
+        front.flush()
+        assert _hb_rows(conn) == []
+
+
+class TestBeatVitals:
+    def _proc_with_history(self, age_s):
+        import main
+        from beats import BeatHistory
+        proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
+        h = BeatHistory()
+        now = time.time()
+        # 6 minutes of beats at 1.0 s with alternating +-20 ms (RMSSD 40 ms).
+        t = now - age_s - 360
+        items = []
+        for i in range(360):
+            items.append((t, 1.0))
+            t += 1.0 + (0.02 if i % 2 else -0.02)
+        h.extend(items)
+        proc.beats = h
+        return proc
+
+    def test_fresh_beats_supply_hr_and_rmssd(self):
+        hr, rmssd = self._proc_with_history(age_s=5)._beat_vitals()
+        assert hr == pytest.approx(60, abs=0.5)
+        assert rmssd == pytest.approx(40, abs=1)
+
+    def test_stale_beats_are_ignored(self):
+        import main
+        assert self._proc_with_history(age_s=main.BEAT_FRESH_S + 10)._beat_vitals() == (None, None)
+
+    def test_no_history_means_no_beat_values(self):
+        import main
+        proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
+        assert proc._beat_vitals() == (None, None)
+
+    def test_window_rate_is_the_beat_trackers_hint_not_the_beat_rate(self, monkeypatch):
+        """The hint must be independent of the beats it guides: the window
+        estimate (72 bpm here), not the beat-derived override (60 bpm)."""
+        import main
+        proc = self._proc_with_history(age_s=5)  # beats say 60 bpm
+        proc.sink = lambda cand: True
+        hints = []
+        proc.rate_hint = hints.append
+        monkeypatch.setattr(main, "subharmonic_summation_hr", lambda *a, **k: (72.0, 0.9))
+        monkeypatch.setattr(main.PresenceDetector, "update", lambda self, *a: True)
+        proc.ingest(np.random.default_rng(3).normal(0, 5e5, 15 * main.SAMPLE_RATE))
+        assert hints == [pytest.approx(60 / 72)]
