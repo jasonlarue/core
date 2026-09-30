@@ -4,7 +4,7 @@ import type * as ScheduleTime from '@/src/lib/scheduleTime'
 import { SchedulePage } from '../SchedulePage'
 
 const m = vi.hoisted(() => ({
-  side: { primarySide: 'left', selectedSide: 'left', selectSide: vi.fn() },
+  side: { primarySide: 'left', selectedSide: 'left', selectSide: vi.fn(), singleSleeperSide: null as string | null },
   schedule: {
     confirmMessage: null as string | null,
     isPowerEnabled: true,
@@ -66,6 +66,7 @@ const DATA = {
 
 beforeEach(() => {
   m.side.selectedSide = 'left'
+  m.side.singleSleeperSide = null
   m.side.selectSide.mockReset()
   m.schedule.isPowerEnabled = true
   m.schedule.confirmMessage = null
@@ -134,6 +135,13 @@ describe('SchedulePage', () => {
     fireEvent.click(toggle)
     expect(m.schedule.toggleGlobalSchedules).toHaveBeenCalledOnce()
     expect(m.schedule.toggleAllSchedules).not.toHaveBeenCalled()
+  })
+
+  it('hides the side switch when one side is away', () => {
+    m.side.singleSleeperSide = 'left'
+    const s = render(<SchedulePage />)
+    expect(s.queryAllByRole('tablist', { name: 'Side' })).toHaveLength(0)
+    expect(s.getByTestId('alarms').textContent).toBe('left/left')
   })
 
   it('reflects the global enabled state, not just today’s power schedule', () => {

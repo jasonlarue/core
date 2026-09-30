@@ -18,6 +18,8 @@ vi.mock('@/src/utils/trpc', () => ({
 }))
 vi.mock('@/src/hooks/useSideNames', () => ({ useSideNames: () => ({ leftName: 'Jon', rightName: 'Heidi' }) }))
 vi.mock('@/src/hooks/useTemperatureUnit', () => ({ useTemperatureUnit: () => ({ unit: 'F' }) }))
+const single = vi.hoisted(() => ({ side: null as 'left' | 'right' | null }))
+vi.mock('@/src/providers/SideProvider', () => ({ useSingleSleeperSide: () => single.side }))
 
 const group: AlarmGroup = {
   ids: [11, 12],
@@ -129,6 +131,22 @@ describe('AlarmEditor', () => {
     s.rerender(<AlarmEditor open={false} onClose={vi.fn()} side="left" existingGroup={{ ...group, ids: [21], alarmTemperature: 70 }} />)
     s.rerender(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={{ ...group, ids: [21], alarmTemperature: 70 }} />)
     expect(s.getByText('70°')).toBeTruthy()
+  })
+
+  it('puts alarms on the sleeper\'s side, without a side picker, when the other side is away', async () => {
+    single.side = 'right'
+    try {
+      const s = render(<AlarmEditor open onClose={vi.fn()} side="left" defaultSide="both" />)
+      expect(s.queryByRole('tablist', { name: 'Alarm side' })).toBeNull()
+      fireEvent.click(s.getByRole('button', { name: 'Weekdays' }))
+      fireEvent.click(saveButton(s))
+      await waitFor(() => expect(m.batch.mutateAsync).toHaveBeenCalled())
+      const sides = m.batch.mutateAsync.mock.calls[0][0].creates.alarm.map((a: { side: string }) => a.side)
+      expect(new Set(sides)).toEqual(new Set(['right']))
+    }
+    finally {
+      single.side = null
+    }
   })
 
   it('surfaces save failures and stays open', async () => {
