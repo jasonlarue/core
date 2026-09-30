@@ -14,7 +14,8 @@ const m = vi.hoisted(() => ({
   tempPending: false,
   refetch: vi.fn(),
   toggleLink: vi.fn(),
-  side: { isLinked: false, primarySide: 'left' as 'left' | 'right' },
+  side: { isLinked: false, primarySide: 'left' as 'left' | 'right', singleSleeperSide: null as 'left' | 'right' | null },
+  timelineSides: undefined as unknown,
   statusLoading: false,
   status: undefined as unknown,
   settings: undefined as unknown,
@@ -65,7 +66,12 @@ vi.mock('../useNightPhases', () => ({
     nudge: m.nudge[side],
   }),
 }))
-vi.mock('../ScheduleTimeline', () => ({ ScheduleTimeline: () => null }))
+vi.mock('../ScheduleTimeline', () => ({
+  ScheduleTimeline: ({ sides }: { sides?: string[] }) => {
+    m.timelineSides = sides
+    return null
+  },
+}))
 vi.mock('../LastNightCard', () => ({ LastNightCard: () => null }))
 vi.mock('../AlarmCard', () => ({ AlarmCard: () => null }))
 vi.mock('../AlarmBanner', () => ({ AlarmBanner: () => null }))
@@ -85,7 +91,8 @@ beforeEach(() => {
   m.setTemp.mockReset()
   m.setPower.mockReset()
   m.tempPending = false
-  m.side = { isLinked: false, primarySide: 'left' }
+  m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: null }
+  m.timelineSides = undefined
   vi.useFakeTimers()
   m.statusLoading = false
   m.control = 'dial'
@@ -138,6 +145,25 @@ describe('TempScreen', () => {
     expect(card(screen, 'Jon (left)').getAllByText('Left · In bed').length).toBeGreaterThan(0)
     expect(card(screen, 'Heidi (right)').getAllByText('Right · Away').length).toBeGreaterThan(0)
     expect(screen.queryByText(/Out of bed/)).toBeNull()
+  })
+
+  it('shows one card for the sleeper when the other side is away', () => {
+    m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: 'left' }
+    const screen = render(<TempScreen />)
+    expect(screen.queryByRole('group', { name: 'Heidi (right)' })).toBeNull()
+    expect(card(screen, 'Jon (left)').getAllByText('In bed').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/^Left ·/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Link sides|Sides linked/ })).toBeNull()
+    expect(m.timelineSides).toEqual(['left'])
+    tap(card(screen, 'Jon (left)').getByRole('button', { name: 'Warmer' }))
+    expect(m.setTemp).toHaveBeenCalledExactlyOnceWith({ side: 'left', temperature: 77 }, expect.anything())
+  })
+
+  it('shows both cards and the link button otherwise', () => {
+    const screen = render(<TempScreen />)
+    expect(screen.getByRole('group', { name: 'Heidi (right)' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Link sides' })).toBeTruthy()
+    expect(m.timelineSides).toEqual(['left', 'right'])
   })
 
   it('+ and − step one degree on only that side when unlinked', () => {
