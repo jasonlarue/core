@@ -230,7 +230,7 @@ export const TempScreen = () => {
               targetF={c.targetF}
               bedF={c.bedF}
               isOn={c.isOn}
-              stepDisabled={!c.isOn || c.tempPending}
+              stepDisabled={!c.isOn}
               powerDisabled={c.powerPending}
               holdMinutes={holdMinutes}
               onHoldChange={setHoldMinutes}

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const m = vi.hoisted(() => ({
   setTemp: vi.fn(),
   setPower: vi.fn(),
+  tempPending: false,
   refetch: vi.fn(),
   toggleLink: vi.fn(),
   side: { isLinked: false, primarySide: 'left' as 'left' | 'right' },
@@ -26,7 +27,7 @@ const m = vi.hoisted(() => ({
 vi.mock('@/src/utils/trpc', () => ({
   trpc: {
     device: {
-      setTemperature: { useMutation: () => ({ mutate: m.setTemp, isPending: false }) },
+      setTemperature: { useMutation: () => ({ mutate: m.setTemp, isPending: m.tempPending }) },
       setPower: { useMutation: () => ({ mutate: m.setPower, isPending: false }) },
       resumeTemperature: { useMutation: () => ({ mutate: vi.fn(), isPending: false, error: null }) },
       getStatus: { useQuery: () => ({ data: { podVersion: 'J00' } }) },
@@ -83,6 +84,7 @@ const sideStatus = (target: number, level = 5) => ({
 beforeEach(() => {
   m.setTemp.mockReset()
   m.setPower.mockReset()
+  m.tempPending = false
   m.side = { isLinked: false, primarySide: 'left' }
   vi.useFakeTimers()
   m.statusLoading = false
@@ -230,6 +232,19 @@ describe('TempScreen', () => {
     const screen = render(<TempScreen />)
     expect(screen.getByText('Connecting…')).toBeTruthy()
     expect(screen.queryByRole('slider')).toBeNull()
+  })
+
+  it('keeps ± usable while a set point is in flight', () => {
+    // Taps are shown at once and pooled into one set point, so a pending
+    // request shouldn't grey the buttons out between taps.
+    m.tempPending = true
+    const screen = render(<TempScreen />)
+    const warmer = card(screen, 'Jon (left)').getByRole('button', { name: 'Warmer' })
+    const cooler = card(screen, 'Jon (left)').getByRole('button', { name: 'Cooler' })
+    expect(warmer.hasAttribute('disabled')).toBe(false)
+    expect(cooler.hasAttribute('disabled')).toBe(false)
+    tap(warmer)
+    expect(m.setTemp).toHaveBeenCalledExactlyOnceWith({ side: 'left', temperature: 77 }, expect.anything())
   })
 
   it('pools a burst of ± taps into one set point', () => {
