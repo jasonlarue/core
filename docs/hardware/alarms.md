@@ -55,6 +55,20 @@ inside a window opens it immediately; the record of an early fire lives in
 memory, so a restart between an early fire and the set time lets the alarm
 fire again at the set time. See `src/scheduler/wakeWindow.ts`.
 
+## Alarm temperature warm-up
+
+An alarm's temperature is a set point at the alarm time, but the water takes a
+while to get there, so the bed would only start warming as you wake. Instead
+the controller asks for it from `ALARM_WARMUP_MIN` (30) minutes before the
+alarm, or from the start of the wake window when that is longer, until the
+alarm (`alarmWarmupTargets` in `src/temperature/baseline.ts`). The request has
+priority 1, so it wins over the night's schedule points in that stretch; at
+the alarm time the alarm's own set point holds the temperature as before.
+
+A scheduled power-off that lands inside a warm-up would switch the bed off
+before the alarm, so it is held as a one-time `power-off-after-alarm-<side>`
+job until the alarm has finished (its time plus vibration, plus a minute).
+
 ## The documented alarm opcodes
 
 frankenfirmware's binary references three alarm-related code paths. Same

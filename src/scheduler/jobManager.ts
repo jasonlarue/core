@@ -22,6 +22,7 @@ import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGua
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
 import { WakeWindows, slotBefore } from './wakeWindow'
+import { alarmWarmupMinutes } from '@/src/temperature/baseline'
 
 const HEARTBEAT_INTERVAL_MS_DEFAULT = 60_000
 const HEARTBEAT_STALE_MS_DEFAULT = 90_000
@@ -386,6 +387,41 @@ export class JobManager {
   }
 
   async runPowerOffJob(sched: typeof powerSchedules.$inferSelect): Promise<void> {
+    // Powering off now would cut short an alarm's warm-up: do it once the
+    // alarm has finished instead.
+    const after = await this.alarmWarmupEnd(sched.side)
+    if (after !== null) {
+      console.log(`[jobManager] power-off-${sched.id} held for the ${sched.side} alarm until ${new Date(after).toISOString()}`)
+      this.scheduler.scheduleOneTimeJob(
+        `power-off-after-alarm-${sched.side}`,
+        JobType.POWER_OFF,
+        new Date(after),
+        () => this.powerOffAfterAlarm(sched),
+        { scheduleId: sched.id, side: sched.side },
+      )
+      return
+    }
+    await this.powerOffAfterAlarm(sched)
+  }
+
+  /**
+   * When `side` is in (or within) an alarm's warm-up, the time that alarm
+   * has finished (its time plus vibration, plus a minute), else null.
+   */
+  private async alarmWarmupEnd(side: 'left' | 'right'): Promise<number | null> {
+    const alarms = await db.select().from(alarmSchedules)
+      .where(and(eq(alarmSchedules.side, side), eq(alarmSchedules.enabled, true)))
+    const now = Date.now()
+    let end: number | null = null
+    for (const alarm of alarms) {
+      const at = this.scheduler.getNextInvocation(`alarm-${alarm.id}`)?.getTime()
+      if (at === undefined || at - now > alarmWarmupMinutes(alarm.wakeWindow) * 60_000) continue
+      end = Math.max(end ?? 0, at + alarm.duration * 1000 + 60_000)
+    }
+    return end
+  }
+
+  private async powerOffAfterAlarm(sched: typeof powerSchedules.$inferSelect): Promise<void> {
     if (await this.hasActiveRunOnceSession(sched.side)) {
       console.log(`Skipping recurring power-off job — run-once session active for ${sched.side}`)
       return
