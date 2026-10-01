@@ -57,13 +57,16 @@ fire again at the set time. See `src/scheduler/wakeWindow.ts`.
 
 ## Alarm temperature warm-up
 
-An alarm's temperature is a set point at the alarm time, but the water takes a
-while to get there, so the bed would only start warming as you wake. Instead
-the controller asks for it from `ALARM_WARMUP_MIN` (30) minutes before the
-alarm, or from the start of the wake window when that is longer, until the
-alarm (`alarmWarmupTargets` in `src/temperature/baseline.ts`). The request has
-priority 1, so it wins over the night's schedule points in that stretch; at
-the alarm time the alarm's own set point holds the temperature as before.
+An alarm's temperature used to be a set point at the alarm time: the bed only
+started warming as you woke, and the temperature then stayed the day's set
+point until the next schedule point (often the evening power-on), so any
+power-on during the day went straight to it. Now each alarm's temperature
+applies over its own span, from `ALARM_WARMUP_MIN` (30) minutes before the
+alarm, or the start of the wake window when longer, until
+`ALARM_HOLD_AFTER_MIN` (15) minutes after it stops vibrating
+(`alarmTemperatureTargets` in `src/temperature/baseline.ts`). The request has
+priority 1, so it wins over the night's schedule points in that span; outside
+it the schedule applies.
 
 A scheduled power-off that lands inside a warm-up would switch the bed off
 before the alarm, so it is held as a one-time `power-off-after-alarm-<side>`

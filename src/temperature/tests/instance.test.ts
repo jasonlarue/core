@@ -190,15 +190,20 @@ describe('production controller with migrated SQLite', () => {
     expect(controller.status('left').targetTemperature).toBe(72)
     vi.setSystemTime(new Date('2026-09-28T22:10:00Z'))
     await controller.reconcile('left')
-    expect(controller.status('left')).toMatchObject({ source: 'schedule', requestId: 'alarm-warmup:1', targetTemperature: 95 })
+    expect(controller.status('left')).toMatchObject({ source: 'schedule', requestId: 'alarm:1', targetTemperature: 95 })
     vi.setSystemTime(new Date('2026-09-28T22:20:00Z'))
     await controller.reconcile('left')
     expect(controller.status('left').targetTemperature).toBe(95)
     expect(hardware.setTemperature).toHaveBeenLastCalledWith('left', 95)
-    // At the alarm its own set point holds the temperature.
-    vi.setSystemTime(new Date('2026-09-28T22:41:00Z'))
+    // Through the alarm (60 s) and 15 minutes after it...
+    vi.setSystemTime(new Date('2026-09-28T22:55:59Z'))
     await controller.reconcile('left')
     expect(controller.status('left')).toMatchObject({ requestId: 'alarm:1', targetTemperature: 95 })
+    // ...then back to the schedule instead of holding 95 until the evening.
+    vi.setSystemTime(new Date('2026-09-28T22:56:00Z'))
+    await controller.reconcile('left')
+    expect(controller.status('left')).toMatchObject({ source: 'schedule', targetTemperature: 68 })
+    expect(hardware.setTemperature).toHaveBeenLastCalledWith('left', 68)
   })
 
   it('expires holds automatically through the service loop', async () => {
