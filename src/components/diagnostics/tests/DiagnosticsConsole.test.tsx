@@ -95,7 +95,6 @@ vi.mock('@/src/providers/SideProvider', async (importOriginal) => {
   return {
     ...actual,
     useShownSides: () => single.sides ?? actual.useShownSides(),
-    useSingleSleeperSide: () => single.sides?.[0] ?? actual.useSingleSleeperSide(),
   }
 })
 
@@ -216,7 +215,6 @@ describe('DiagnosticsConsole dashboard', () => {
       expect(screen.queryByTestId('tonight-right')).toBeNull()
       expect(screen.getByTestId('side-left')).toBeTruthy()
       expect(screen.queryByTestId('side-right')).toBeNull()
-      expect(screen.getByTestId('away-note').textContent).toBe('Right side set to away')
     }
     finally {
       single.sides = null

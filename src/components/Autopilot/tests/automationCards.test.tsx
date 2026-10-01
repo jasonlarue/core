@@ -18,7 +18,6 @@ vi.mock('@/src/providers/SideProvider', async (importOriginal) => {
   return {
     ...actual,
     useShownSides: () => single.sides ?? actual.useShownSides(),
-    useSingleSleeperSide: () => single.sides?.[0] ?? actual.useSingleSleeperSide(),
   }
 })
 vi.mock('@/src/hooks/useSideNames', () => ({ useSideNames: () => ({ sideName: (side: string) => side === 'left' ? 'Alex' : 'Sam' }) }))
@@ -150,7 +149,6 @@ it('shows tonight for the sleeper\'s side only when the other is away', () => {
     render(<TonightCard rules={[]} tonight={undefined} fires={[]} unit="F" />)
     expect(screen.getByTestId('owner-right')).toBeTruthy()
     expect(screen.queryByTestId('owner-left')).toBeNull()
-    expect(screen.getByTestId('away-note').textContent).toBe('Left side set to away')
   }
   finally {
     single.sides = null

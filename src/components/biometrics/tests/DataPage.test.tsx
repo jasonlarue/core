@@ -16,7 +16,6 @@ vi.mock('@/src/providers/SideProvider', () => ({
     selectedSide: 'both', primarySide: state.primarySide, activeSides: ['left', 'right'],
     singleSleeperSide: state.singleSleeperSide, selectSide: state.selectSide,
   }),
-  useSingleSleeperSide: () => state.singleSleeperSide,
 }))
 vi.mock('@/src/hooks/useWeekNavigator', () => ({
   useWeekNavigator: () => ({
@@ -58,7 +57,6 @@ describe('DataPage single-sleeper routing', () => {
     state.singleSleeperSide = home
     render(<DataPage />)
     expect(screen.queryByRole('tablist', { name: 'Person' })).toBeNull()
-    expect(screen.getByTestId('away-note').textContent).toBe(`${home === 'left' ? 'Right' : 'Left'} side set to away`)
     expect(sidesQueried(state.sleep)).toEqual(new Set([home]))
     expect(sidesQueried(state.stages)).toEqual(new Set([home]))
     expect(sidesQueried(state.vitals)).toEqual(new Set([home]))
@@ -71,7 +69,6 @@ describe('DataPage single-sleeper routing', () => {
     expect(sidesQueried(state.sleep)).toEqual(new Set([side]))
     const person = screen.getByRole('tablist', { name: 'Person' })
     expect(person.textContent).toBe('JonHeidi')
-    expect(screen.queryByTestId('away-note')).toBeNull()
     fireEvent.click(screen.getByRole('tab', { name: other === 'left' ? 'Jon' : 'Heidi' }))
     expect(state.selectSide).toHaveBeenCalledWith(other)
   })

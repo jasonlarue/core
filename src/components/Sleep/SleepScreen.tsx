@@ -12,7 +12,6 @@ import { NightView } from './NightView'
 import { WeekView } from './WeekView'
 import { MonthView } from './MonthView'
 import { formatRange, monthStart, type Side, type SleepView } from './sleepData'
-import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 
 const VIEWS = [
   { value: 'night', label: 'Night' },
@@ -115,7 +114,7 @@ export function SleepScreen({ sectionSwitch }: { sectionSwitch?: ReactNode } = {
           : 'Sleep'}
         middle={(
           <>
-            {personControl ? <div className="ml-auto min-[900px]:ml-0">{personControl}</div> : <AwayNote className="ml-auto min-[900px]:ml-0" />}
+            {personControl && <div className="ml-auto min-[900px]:ml-0">{personControl}</div>}
             <div className="ml-auto hidden items-center gap-4 min-[900px]:flex">
               {navigator()}
               {viewControl(false)}

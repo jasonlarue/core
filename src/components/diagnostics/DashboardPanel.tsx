@@ -25,7 +25,6 @@ import { attentionItems, isPodLaneJob, jobsInWindow, nextTemperatureJob, podJobL
 import { nearestPoint, panelDomain, seriesPath, THERMAL_PANELS } from './thermalHistoryLogic'
 import type { DiagSection } from './DiagnosticsConsole'
 import { OccupancyCheck } from './OccupancyCheck'
-import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 
 type ThermalData = inferRouterOutputs<AppRouter>['health']['thermal']
 type ThermalSide = ThermalData['sides'][number]
@@ -305,7 +304,6 @@ function TonightCard({ onJump }: { onJump: (s: DiagSection) => void }) {
     <Card className="gap-3" data-testid="tonight">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <span className="text-[15px] font-medium">Tonight</span>
-        <AwayNote />
         <span className="font-mono text-xs text-fg-2">
           {next
             ? `next: ${next.side === 'left' || next.side === 'right' ? sideName(next.side) : 'Both'} → ${fToDisplay(next.targetTempF as number)} at ${fmtClock(next.nextRun)} · in ${formatCountdown(new Date(next.nextRun as string).getTime() - now)}`
