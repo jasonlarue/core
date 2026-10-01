@@ -1569,6 +1569,61 @@ describe('JobManager residual mutation contracts', () => {
     vi.restoreAllMocks()
   })
 
+  describe('power-off during an alarm warm-up', () => {
+    const power = { ...row, id: 31, side: 'left' as const, dayOfWeek: 'monday' as const, onTime: '22:00', offTime: '07:30', onTemperature: 80 }
+    const alarmRow = { id: 5, side: 'left', enabled: true, duration: 120, wakeWindow: 0 }
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-10-01T11:30:00.000Z'))
+      vi.spyOn(manager, 'hasActiveRunOnceSession').mockResolvedValue(false)
+      vi.spyOn(console, 'log').mockImplementation(() => {})
+    })
+
+    const alarmIn = (minutes: number, wakeWindow = 0) => {
+      vi.spyOn(db, 'select').mockReturnValueOnce({ from: () => queryRows([{ ...alarmRow, wakeWindow }]) } as any)
+      vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockImplementation(id =>
+        id === 'alarm-5' ? new Date(Date.now() + minutes * 60_000) : null)
+    }
+
+    it('holds the power-off until the alarm has finished, then powers off', async () => {
+      const captured = captureOneTimeJobs()
+      const schedule = vi.mocked(manager.getScheduler().scheduleOneTimeJob)
+      alarmIn(10)
+      await manager.runPowerOffJob(power)
+      expect(control.powerOffLocked).not.toHaveBeenCalled()
+      const [id, type, fireDate] = schedule.mock.calls[0]
+      expect(id).toBe('power-off-after-alarm-left')
+      expect(type).toBe(JobType.POWER_OFF)
+      // Alarm in 10 min + 120 s vibration + 1 min.
+      expect(fireDate.getTime()).toBe(Date.now() + 10 * 60_000 + 120_000 + 60_000)
+      await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
+      expect(control.powerOffLocked).toHaveBeenCalledWith('left')
+    })
+
+    it('powers off at once when the alarm is beyond its warm-up', async () => {
+      const schedule = vi.spyOn(manager.getScheduler(), 'scheduleOneTimeJob')
+      alarmIn(31)
+      await manager.runPowerOffJob(power)
+      expect(schedule).not.toHaveBeenCalled()
+      expect(control.powerOffLocked).toHaveBeenCalledWith('left')
+    })
+
+    it('uses the wake window as the warm-up when longer', async () => {
+      captureOneTimeJobs()
+      alarmIn(40, 45)
+      await manager.runPowerOffJob(power)
+      expect(control.powerOffLocked).not.toHaveBeenCalled()
+    })
+
+    it('ignores alarms with no upcoming run', async () => {
+      vi.spyOn(db, 'select').mockReturnValueOnce({ from: () => queryRows([alarmRow]) } as any)
+      vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockReturnValue(null)
+      await manager.runPowerOffJob(power)
+      expect(control.powerOffLocked).toHaveBeenCalledWith('left')
+    })
+  })
+
   it('logs every recurring-job skip and the alarm vibration-only branch exactly', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(manager, 'hasActiveRunOnceSession')

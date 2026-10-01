@@ -50,6 +50,54 @@ export function recurringTarget(rows: WeeklyTarget[], timezone: string, now: num
   return latest
 }
 
+/** Minutes before an alarm its temperature takes over, so the bed is there by wake time. */
+export const ALARM_WARMUP_MIN = 30
+
+export interface AlarmWarmup extends WeeklyTarget {
+  /** The alarm's wake window (minutes); the warm-up covers it when longer. */
+  wakeWindow: number
+}
+
+export type AlarmOccurrenceCache = Map<string, number>
+
+/** Warm-up lead for an alarm: ALARM_WARMUP_MIN, or its wake window when longer. */
+export function alarmWarmupMinutes(wakeWindow: number): number {
+  return Math.max(ALARM_WARMUP_MIN, wakeWindow)
+}
+
+/**
+ * Alarm temperatures in their warm-up. An alarm's temperature is a set point
+ * at the alarm time, but the water needs a while to get there, so from
+ * alarmWarmupMinutes before the next occurrence until the alarm it is
+ * requested at priority 1, ahead of the night's schedule points. At the alarm
+ * time the alarm's own set point takes over.
+ */
+export function alarmWarmupTargets(rows: AlarmWarmup[], timezone: string, now: number, cache: AlarmOccurrenceCache = new Map()): TemperatureRequest[] {
+  const out: TemperatureRequest[] = []
+  const activeKeys = new Set<string>()
+  for (const row of rows) {
+    const key = JSON.stringify([timezone, row.dayOfWeek, row.time])
+    activeKeys.add(key)
+    let alarmAt = cache.get(key)
+    if (alarmAt === undefined || now >= alarmAt) {
+      const [hour, minute] = row.time.split(':').map(Number)
+      const cron = `${minute} ${hour} * * ${DAYS_OF_WEEK.indexOf(row.dayOfWeek)}`
+      alarmAt = parseExpression(cron, { currentDate: new Date(now), tz: timezone }).next().getTime()
+      cache.set(key, alarmAt)
+    }
+    const startsAt = alarmAt - alarmWarmupMinutes(row.wakeWindow) * 60_000
+    if (now < startsAt) continue
+    out.push({
+      id: `alarm-warmup:${row.id.replace(/^alarm:/, '')}`, source: 'schedule', temperature: row.temperature,
+      startsAt, expiresAt: alarmAt, createdAt: startsAt, priority: 1,
+    })
+  }
+  for (const key of cache.keys()) {
+    if (!activeKeys.has(key)) cache.delete(key)
+  }
+  return out
+}
+
 export interface SessionTarget {
   id: number
   startedAt: Date
