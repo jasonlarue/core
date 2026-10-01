@@ -52,10 +52,14 @@ export function recurringTarget(rows: WeeklyTarget[], timezone: string, now: num
 
 /** Minutes before an alarm its temperature takes over, so the bed is there by wake time. */
 export const ALARM_WARMUP_MIN = 30
+/** Minutes the alarm temperature holds after the alarm stops vibrating (covers a snooze or two). */
+export const ALARM_HOLD_AFTER_MIN = 15
 
-export interface AlarmWarmup extends WeeklyTarget {
+export interface AlarmTemperatureRow extends WeeklyTarget {
   /** The alarm's wake window (minutes); the warm-up covers it when longer. */
   wakeWindow: number
+  /** Vibration length (seconds). */
+  duration: number
 }
 
 export type AlarmOccurrenceCache = Map<string, number>
@@ -66,30 +70,32 @@ export function alarmWarmupMinutes(wakeWindow: number): number {
 }
 
 /**
- * Alarm temperatures in their warm-up. An alarm's temperature is a set point
- * at the alarm time, but the water needs a while to get there, so from
- * alarmWarmupMinutes before the next occurrence until the alarm it is
- * requested at priority 1, ahead of the night's schedule points. At the alarm
- * time the alarm's own set point takes over.
+ * Alarm temperatures, each over its own span: from alarmWarmupMinutes before
+ * the alarm (the water needs a while to get there) until ALARM_HOLD_AFTER_MIN
+ * after it stops vibrating, at priority 1 so it wins over the night's
+ * schedule points. Outside that span the schedule applies — an alarm's
+ * temperature no longer lingers as the day's set point until the evening.
  */
-export function alarmWarmupTargets(rows: AlarmWarmup[], timezone: string, now: number, cache: AlarmOccurrenceCache = new Map()): TemperatureRequest[] {
+export function alarmTemperatureTargets(rows: AlarmTemperatureRow[], timezone: string, now: number, cache: AlarmOccurrenceCache = new Map()): TemperatureRequest[] {
   const out: TemperatureRequest[] = []
   const activeKeys = new Set<string>()
   for (const row of rows) {
-    const key = JSON.stringify([timezone, row.dayOfWeek, row.time])
+    const afterMs = row.duration * 1000 + ALARM_HOLD_AFTER_MIN * 60_000
+    const key = JSON.stringify([timezone, row.dayOfWeek, row.time, afterMs])
     activeKeys.add(key)
     let alarmAt = cache.get(key)
-    if (alarmAt === undefined || now >= alarmAt) {
+    if (alarmAt === undefined || now >= alarmAt + afterMs) {
+      // The occurrence whose span may still hold now, else the next one.
       const [hour, minute] = row.time.split(':').map(Number)
       const cron = `${minute} ${hour} * * ${DAYS_OF_WEEK.indexOf(row.dayOfWeek)}`
-      alarmAt = parseExpression(cron, { currentDate: new Date(now), tz: timezone }).next().getTime()
+      alarmAt = parseExpression(cron, { currentDate: new Date(now - afterMs), tz: timezone }).next().getTime()
       cache.set(key, alarmAt)
     }
     const startsAt = alarmAt - alarmWarmupMinutes(row.wakeWindow) * 60_000
     if (now < startsAt) continue
     out.push({
-      id: `alarm-warmup:${row.id.replace(/^alarm:/, '')}`, source: 'schedule', temperature: row.temperature,
-      startsAt, expiresAt: alarmAt, createdAt: startsAt, priority: 1,
+      id: row.id, source: 'schedule', temperature: row.temperature,
+      startsAt, expiresAt: alarmAt + afterMs, createdAt: startsAt, priority: 1,
     })
   }
   for (const key of cache.keys()) {
