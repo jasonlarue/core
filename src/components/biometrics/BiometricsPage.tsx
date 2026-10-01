@@ -24,7 +24,6 @@ import { useSideNames } from '@/src/hooks/useSideNames'
 import { OccupancyCheck } from '@/src/components/diagnostics/OccupancyCheck'
 import { RawDataButton } from './RawDataButton'
 import { VitalsChart, VitalsLegend } from './VitalsChart'
-import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 import {
   baselineBand, clock, fmtDuration, formatRangeLabel, METRICS, metricStats, nightWindow, rangeWindow, SESSION_GAP_MS, splitSessions, STALE_MS,
   type BiometricsRange, type MetricDef, type MetricKey, type RangeWindow, type Session, type VitalPoint,
@@ -104,7 +103,6 @@ function BiometricsBody({ sectionSwitch, now }: { sectionSwitch?: ReactNode, now
         )}
         right={(
           <>
-            {!toggleSide && <AwayNote />}
             {toggleSide && (
               <SegmentedControl
                 ariaLabel="Person"

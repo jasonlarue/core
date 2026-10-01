@@ -21,7 +21,6 @@ import { formatSetpointF, type TempUnit } from '@/src/lib/tempUtils'
 import type { Condition } from '@/src/automation/types'
 import { trpc } from '@/src/utils/trpc'
 import { clock, ownerView, ruleWindow, scheduleBands, scheduleBlocks, type Owner, type RuleMode, type SideTonight } from './automationsLogic'
-import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 
 type Side = 'left' | 'right'
 const HOUR = 3_600_000
@@ -83,7 +82,6 @@ export function TonightCard({ rules, tonight, fires, unit }: {
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="text-[15px] font-medium">Who controls the bed tonight</span>
         <span className="font-mono text-xs text-fg-2">6 PM → 9 AM</span>
-        <AwayNote />
         <div className="ml-auto flex items-center gap-4 font-mono text-[11px] text-fg-2">
           <span className="flex items-center gap-1.5">
             <span className="h-2 w-3.5 rounded-[2px] border border-link bg-link/30" />
