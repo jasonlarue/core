@@ -23,7 +23,6 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ScheduleToggle } from './ScheduleToggle'
 import { SchedulerConfirmation } from './SchedulerConfirmation'
 import { AlarmSection } from './AlarmSection'
-import { AwayNote } from '@/src/components/SideSelector/AwayNote'
 
 interface EditingCurve {
   days: DayOfWeek[]
@@ -176,7 +175,7 @@ export function SchedulePage() {
       <PageHeader
         title="Schedule"
         middle={singleSleeperSide
-          ? <AwayNote className="hidden min-[900px]:inline" />
+          ? undefined
           : (
               <div className="hidden min-[900px]:block">
                 <SegmentedControl ariaLabel="Side" options={sideOptions} value={selectedSide} onChange={selectSide} />
@@ -196,7 +195,6 @@ export function SchedulePage() {
         )}
       />
 
-      <AwayNote className="min-[900px]:hidden" />
       {!singleSleeperSide && (
         <SegmentedControl
           full

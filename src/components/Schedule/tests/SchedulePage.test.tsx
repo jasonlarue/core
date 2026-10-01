@@ -20,7 +20,7 @@ const m = vi.hoisted(() => ({
   query: { data: undefined as unknown, isLoading: false, error: null as Error | null },
   health: { data: undefined as unknown },
 }))
-vi.mock('@/src/providers/SideProvider', () => ({ useSide: () => m.side, useSingleSleeperSide: () => m.side.singleSleeperSide }))
+vi.mock('@/src/providers/SideProvider', () => ({ useSide: () => m.side }))
 vi.mock('@/src/hooks/useSchedule', () => ({ useSchedule: () => m.schedule }))
 vi.mock('@/src/hooks/useScheduleActive', () => ({ useScheduleActive: () => ({ nextEvent: { time: '12:30 AM', temperature: 79 } }) }))
 vi.mock('@/src/hooks/useSideNames', () => ({ useSideNames: () => ({ leftName: 'Jon', rightName: 'Heidi' }) }))
@@ -118,7 +118,6 @@ describe('SchedulePage', () => {
     const s = render(<SchedulePage />)
     expect(s.queryAllByRole('tablist', { name: 'Side' })).toHaveLength(0)
     expect(s.getByTestId('alarms').textContent).toBe('right/right')
-    expect(s.getAllByTestId('away-note').map(n => n.textContent)).toEqual(['Left side set to away', 'Left side set to away'])
   })
 
   it('reflects the global enabled state, not just today’s power schedule', () => {
