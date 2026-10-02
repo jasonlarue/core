@@ -1763,6 +1763,7 @@ describe('JobManager residual mutation contracts', () => {
         dayOfWeek: 'monday',
         time: '06:50',
         alarmTemperature: 80,
+        wakeWindow: 0,
         vibrationIntensity: 100,
         vibrationPattern: 'rise',
         duration: 120,
