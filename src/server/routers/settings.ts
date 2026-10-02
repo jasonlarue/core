@@ -40,6 +40,9 @@ const deviceSettingsSchema = z.object({
   updatedAt: timestampSchema,
 })
 
+/** Biological sex as the sleep-stage model was trained with it. */
+const sexSchema = z.enum(['female', 'male'])
+
 const sideSettingsSchema = z.object({
   side: sideSchema,
   name: z.string(),
@@ -49,6 +52,8 @@ const sideSettingsSchema = z.object({
   autoOffMinutes: z.number(),
   awayStart: z.string().nullable().optional(),
   awayReturn: z.string().nullable().optional(),
+  age: z.number().int().nullable().optional(),
+  sex: sexSchema.nullable().optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 })
@@ -189,8 +194,8 @@ export const settingsRouter = router({
             updatedAt: new Date(),
           },
           sides: {
-            left: sides.find(s => s.side === 'left') ?? { side: 'left' as const, name: 'Left', alwaysOn: false, awayMode: false, autoOffEnabled: false, autoOffMinutes: 30, createdAt: new Date(), updatedAt: new Date() },
-            right: sides.find(s => s.side === 'right') ?? { side: 'right' as const, name: 'Right', alwaysOn: false, awayMode: false, autoOffEnabled: false, autoOffMinutes: 30, createdAt: new Date(), updatedAt: new Date() },
+            left: sides.find(s => s.side === 'left') ?? { side: 'left' as const, name: 'Left', alwaysOn: false, awayMode: false, autoOffEnabled: false, autoOffMinutes: 30, age: null, sex: null, createdAt: new Date(), updatedAt: new Date() },
+            right: sides.find(s => s.side === 'right') ?? { side: 'right' as const, name: 'Right', alwaysOn: false, awayMode: false, autoOffEnabled: false, autoOffMinutes: 30, age: null, sex: null, createdAt: new Date(), updatedAt: new Date() },
           },
           gestures: {
             left: gestures.filter(g => g.side === 'left'),
@@ -458,6 +463,9 @@ export const settingsRouter = router({
           autoOffMinutes: z.number().int().min(5).max(120).optional(),
           awayStart: isoDatetimeSchema.nullable().optional(),
           awayReturn: isoDatetimeSchema.nullable().optional(),
+          // Optional sleeper profile for sleep staging; null clears it.
+          age: z.number().int().min(1).max(120).nullable().optional(),
+          sex: sexSchema.nullable().optional(),
         })
         .strict()
     )
@@ -470,6 +478,8 @@ export const settingsRouter = router({
       autoOffMinutes: z.number(),
       awayStart: z.string().nullable(),
       awayReturn: z.string().nullable(),
+      age: z.number().nullable().optional(),
+      sex: sexSchema.nullable().optional(),
       createdAt: z.date(),
       updatedAt: z.date(),
     }))
@@ -618,6 +628,8 @@ export const settingsRouter = router({
       autoOffMinutes: z.number(),
       awayStart: z.string().nullable(),
       awayReturn: z.string().nullable(),
+      age: z.number().nullable().optional(),
+      sex: sexSchema.nullable().optional(),
       createdAt: z.date(),
       updatedAt: z.date(),
     }))

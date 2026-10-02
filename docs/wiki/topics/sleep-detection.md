@@ -61,7 +61,7 @@ Records include entry/exit timestamps, duration, exit count, and present/absent 
 
 1. Cross-side vibration coupling causes brief spikes (200-500) on the empty side
 2. Presence chattering on drifted baselines inflates `times_exited_bed`
-3. No sleep stage classification (wake vs sleep only via movement density)
+3. No sleep stage classification in this module — the server stages nights from detected heartbeats (`src/lib/sleepStaging/`)
 4. Scale calibration tuned on one Pod 5
 5. frzHealth pump signal is Pod 5 only with ~16s detection latency
 6. Pump gate field names not confirmed on all firmware versions

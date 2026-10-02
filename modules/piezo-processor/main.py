@@ -47,6 +47,7 @@ from common.nats_follower import create_follower
 from common.dialect import KNOWN_RECORD_TYPES, warn_unknown_type_once
 from common.side_mode import SingleSleeperMode
 from common.bed_presence import BedPresence
+from beats import BeatHistory, BeatTracker, Chunk
 import numpy as np
 from scipy.signal import butter, sosfiltfilt, hilbert, find_peaks
 
@@ -85,6 +86,13 @@ PUMP_COUPLING_ACR_THRESHOLD = 0.6 # require strong autocorr to enter
 
 # HR band: 0.8 Hz preserves fundamental of 48+ BPM; 8.5 Hz per PMC7582983
 HR_BAND = (0.8, 8.5)
+
+# Beat-to-beat vitals (beats.py) replace the window estimates when the latest
+# committed beat is this recent — beats commit ~12.5 s behind real time, and
+# a restart's replay of old RAW data must not report stale values as current.
+BEAT_FRESH_S = 45.0
+# Vitals-quality confidence credited to a beat-derived heart rate.
+BEAT_HR_CONFIDENCE = 0.8
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -298,6 +306,85 @@ class SingleSleeperVitals:
             return True
         self._pending_at = self._clock()
         return False
+
+
+def write_heartbeats(holder: "DBHolder", side: str, chunk: Chunk) -> bool:
+    """Insert one minute of detected beats. Replays after a restart produce
+    the same rows again, so conflicts are ignored."""
+    try:
+        with holder.conn:
+            holder.conn.execute(
+                "INSERT OR IGNORE INTO heartbeats (side, timestamp, beats, quality) "
+                "VALUES (?, ?, ?, ?)",
+                (side, int(chunk.start), json.dumps(chunk.beats), round(chunk.quality, 3)),
+            )
+        return True
+    except sqlite3.Error as e:
+        log.warning("write_heartbeats failed: %s", e)
+        return False
+
+
+class BeatFront:
+    """Beat detection for both sides. Each side's tracker gets its own two
+    piezo channels plus the other side's as the noise reference. Finished
+    minutes go to the heartbeats table; with one side in away mode (single
+    sleeper), each minute keeps whichever side saw the sleeper's beats best,
+    stored under the home side.
+
+    A side's tracker only runs while `present(side)` holds. An empty bed
+    still carries regular vibration from the pod itself, which the detector
+    can mistake for a heartbeat; the vitals presence detector already tells
+    the two apart, so beats follow it. Leaving the bed is a gap, so no
+    interval spans an absence."""
+
+    def __init__(self, holder: "DBHolder", mode: SingleSleeperMode,
+                 present: Callable[[str], bool] = lambda side: True):
+        self._holder = holder
+        self._mode = mode
+        self._present = present
+        self._was_present = {"left": False, "right": False}
+        self.trackers = {"left": BeatTracker("left"), "right": BeatTracker("right")}
+
+    def history(self, side: str) -> BeatHistory:
+        return self.trackers[side].history
+
+    def set_rate_hint(self, side: str, period: float) -> None:
+        self.trackers[side].set_rate_hint(period, time.time())
+
+    def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
+             r1: np.ndarray, r2: Optional[np.ndarray], masked: bool = False) -> None:
+        signals = {"left": (l1, l2, r1, r2), "right": (r1, r2, l1, l2)}
+        for side, tracker in self.trackers.items():
+            present = self._present(side)
+            if present:
+                tracker.push(ts, *signals[side], masked=masked)
+            elif self._was_present[side]:
+                tracker.gap()
+            self._was_present[side] = present
+        self._write({s: t.take_chunks() for s, t in self.trackers.items()})
+
+    def gap(self) -> None:
+        for t in self.trackers.values():
+            t.gap()
+
+    def flush(self) -> None:
+        self._write({s: t.take_chunks(flush_before=float("inf"))
+                     for s, t in self.trackers.items()})
+
+    def _write(self, chunks: dict) -> None:
+        home = self._mode.home_side()
+        if home is None:
+            for side, cs in chunks.items():
+                for c in cs:
+                    write_heartbeats(self._holder, side, c)
+            return
+        by_start: dict = {}
+        for cs in chunks.values():
+            for c in cs:
+                by_start.setdefault(c.start, []).append(c)
+        for start in sorted(by_start):
+            best = max(by_start[start], key=lambda c: c.coverage * c.quality)
+            write_heartbeats(self._holder, home, best)
 
 
 def report_health(status: str, message: str) -> None:
@@ -925,9 +1012,25 @@ class SideProcessor:
         # Where computed vitals go; None writes them under this side.
         # main() routes both sides through SingleSleeperVitals.submit.
         self.sink: Optional[Callable[[VitalsCandidate], bool]] = None
+        # Cleaned beat-to-beat history (beats.py); main() wires it in.
+        self.beats: Optional[BeatHistory] = None
+        # Receives this side's tracked window heart rate as a period (s),
+        # before any beat-derived override; main() points it at the beat
+        # tracker.
+        self.rate_hint: Optional[Callable[[float], None]] = None
         # The bed's own answer to "is anyone here" (sleep-detector presence):
         # False vetoes piezo presence, None (unknown) leaves it alone.
         self.bed_occupied: Optional[Callable[[], Optional[bool]]] = None
+
+    def _beat_vitals(self) -> tuple:
+        """(heart_rate, rmssd_ms) from detected beats, each None when the
+        history is stale or doesn't cover enough of its window."""
+        if self.beats is None:
+            return None, None
+        latest = self.beats.latest_time()
+        if latest is None or time.time() - latest > BEAT_FRESH_S:
+            return None, None
+        return self.beats.heart_rate(), self.beats.rmssd_ms()
 
     def ingest(self, samples: np.ndarray) -> None:
         self._hr_buf.extend(samples)
@@ -1014,6 +1117,8 @@ class SideProcessor:
         # --- Heart rate (subharmonic summation + tracking) ---
         hr_raw, hr_score = subharmonic_summation_hr(hr_arr)
         hr = self._hr_tracker.update(hr_raw, hr_score)
+        if hr is not None and hr > 0 and self.rate_hint is not None:
+            self.rate_hint(60.0 / hr)
 
         # --- Breathing rate (Hilbert envelope) ---
         br = compute_breathing_rate(np.array(self._br_buf))
@@ -1022,6 +1127,15 @@ class SideProcessor:
         hrv_arr = np.array(self._hrv_buf)
         hrv = compute_hrv(hrv_arr) if len(hrv_arr) >= int(
             HRV_WINDOW_S * SAMPLE_RATE) else None
+
+        # Beat-to-beat values win when available: HR from the last minute
+        # of clean intervals, HRV as 5-minute RMSSD (Task Force 1996).
+        beat_hr, beat_hrv = self._beat_vitals()
+        if beat_hr is not None:
+            hr = beat_hr
+            hr_score = max(hr_score, BEAT_HR_CONFIDENCE)
+        if beat_hrv is not None:
+            hrv = beat_hrv
 
         if hr is not None or hrv is not None or br is not None:
             ts = datetime.now(timezone.utc)
@@ -1037,6 +1151,10 @@ class SideProcessor:
                 flags.append("no_br")
             if med_std < self._presence.enter_threshold:
                 flags.append("low_signal")
+            if beat_hr is not None:
+                flags.append("beat_hr")
+            if beat_hrv is not None:
+                flags.append("beat_hrv")
             cand = VitalsCandidate(self.side, ts, hr, hrv, br, quality, flags or None, hr_raw)
             wrote = self.sink(cand) if self.sink is not None else cand.write(self.db_holder)
             log.info("vitals %s — HR=%.1f HRV=%.1f BR=%.1f q=%.2f", self.side,
@@ -1113,6 +1231,17 @@ def main() -> None:
     bed = BedPresence(SLEEP_DETECTOR_STATE)
     left.bed_occupied = lambda: bed.occupied(bed_mode.home_side() or "left")
     right.bed_occupied = lambda: bed.occupied(bed_mode.home_side() or "right")
+    sides = {"left": left, "right": right}
+    beat_front = BeatFront(
+        db_holder, bed_mode,
+        present=lambda s: (sides[s]._presence.state == PresenceDetector.PRESENT
+                           and bed.occupied(bed_mode.home_side() or s) is not False))
+    left.beats = beat_front.history("left")
+    right.beats = beat_front.history("right")
+    # Each side's window heart rate guides its beat tracker (see beats.py
+    # HINT_MAX_AGE_S): envelope periodicity alone can take half-beats for beats.
+    left.rate_hint = lambda period: beat_front.set_rate_hint("left", period)
+    right.rate_hint = lambda period: beat_front.set_rate_hint("right", period)
     # Source selected once at startup: NatsFollower on new-firmware pods (NATS
     # reachable), else the unchanged .RAW tailer. Same decoded-record contract.
     follower = create_follower(RAW_DATA_DIR, _shutdown, poll_interval=0.01)
@@ -1147,10 +1276,20 @@ def main() -> None:
             if l_samples.size == 0 or r_samples.size == 0:
                 continue
 
-            # Pump gating — drop entire record if pump detected or guard active
+            ts = record.get("ts")
+            ts = float(ts) if isinstance(ts, (int, float)) else time.time()
+            l2 = _int32_samples(record.get("left2", b""))
+            r2 = _int32_samples(record.get("right2", b""))
+
+            # Pump gating — drop entire record if pump detected or guard active.
+            # Beat tracking blanks it instead: a restart would cost a window.
             if pump_gate.check(l_samples, r_samples):
+                beat_front.push(ts, l_samples, l2, r_samples, r2, masked=True)
                 continue
 
+            # Beat detection uses both piezo channels of each side, and the
+            # other side as a noise reference.
+            beat_front.push(ts, l_samples, l2, r_samples, r2)
             left.ingest(l_samples)
             right.ingest(r_samples)
 
@@ -1159,6 +1298,7 @@ def main() -> None:
         report_health("down", str(e))
         sys.exit(1)
     finally:
+        beat_front.flush()
         vitals_router.flush()
         db_holder.conn.close()
         log.info("Shutdown complete")

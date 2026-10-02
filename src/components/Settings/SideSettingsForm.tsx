@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { trpc } from '@/src/utils/trpc'
-import { Card, CardHeader, InlineError, SelectValue, SettingRow, StatusDot, TextField, Toggle } from '@/src/components/ds'
+import { Card, CardHeader, InlineError, SegmentedControl, SelectValue, SettingRow, StatusDot, TextField, Toggle } from '@/src/components/ds'
 import { SectionColumns } from './SettingsLayout'
 
 interface SideData {
@@ -12,7 +12,19 @@ interface SideData {
   alwaysOn: boolean
   autoOffEnabled: boolean
   autoOffMinutes: number
+  age?: number | null
+  sex?: Sex | null
 }
+
+type Sex = 'female' | 'male'
+
+// SegmentedControl values are strings, so "Not set" rides as 'unset' and maps
+// back to null on save.
+const SEX_OPTIONS: { value: Sex | 'unset', label: string }[] = [
+  { value: 'female', label: 'Female' },
+  { value: 'male', label: 'Male' },
+  { value: 'unset', label: 'Not set' },
+]
 
 interface SideSettingsFormProps {
   side: 'left' | 'right'
@@ -34,7 +46,8 @@ function formatMinutes(mins: number): string {
 }
 
 /**
- * Per-side settings: profile name, away mode, always on, and auto-off.
+ * Per-side settings: profile name, away mode, always on, auto-off, and the
+ * optional sleeper profile (age, sex) used by the sleep-stage model.
  */
 export function SideSettingsForm({ side, sideData, presenceAvailable }: SideSettingsFormProps) {
   const d = sideData ?? {
@@ -44,12 +57,14 @@ export function SideSettingsForm({ side, sideData, presenceAvailable }: SideSett
     alwaysOn: false,
     autoOffEnabled: false,
     autoOffMinutes: 30,
+    age: null,
+    sex: null,
   }
 
   // key forces remount when server data changes, replacing the useEffect sync pattern
   return (
     <SideCards
-      key={`${d.side}-${d.name}-${d.awayMode}-${d.alwaysOn}-${d.autoOffEnabled}-${d.autoOffMinutes}`}
+      key={`${d.side}-${d.name}-${d.awayMode}-${d.alwaysOn}-${d.autoOffEnabled}-${d.autoOffMinutes}-${d.age ?? ''}-${d.sex ?? ''}`}
       data={d}
       presenceAvailable={presenceAvailable}
     />
@@ -63,6 +78,8 @@ function SideCards({ data, presenceAvailable }: { data: SideData, presenceAvaila
   const [alwaysOn, setAlwaysOn] = useState(data.alwaysOn)
   const [autoOffEnabled, setAutoOffEnabled] = useState(data.autoOffEnabled)
   const [autoOffMinutes, setAutoOffMinutes] = useState(data.autoOffMinutes)
+  const [age, setAge] = useState(data.age != null ? String(data.age) : '')
+  const [sex, setSex] = useState<Sex | null>(data.sex ?? null)
 
   const mutation = trpc.settings.updateSide.useMutation({
     onSuccess: () => utils.settings.getAll.invalidate(),
@@ -125,6 +142,27 @@ function SideCards({ data, presenceAvailable }: { data: SideData, presenceAvaila
     }
   }
 
+  function handleAgeBlur() {
+    const trimmed = age.trim()
+    const current = data.age ?? null
+    if (trimmed === '') {
+      if (current !== null) mutation.mutate({ side: data.side, age: null })
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 120) {
+      setAge(current != null ? String(current) : '') // revert
+      return
+    }
+    if (parsed !== current) mutation.mutate({ side: data.side, age: parsed })
+  }
+
+  function handleSexChange(value: Sex | null) {
+    if (value === sex) return
+    setSex(value)
+    mutation.mutate({ side: data.side, sex: value })
+  }
+
   function handleAutoOffMinutesChange(minutes: number) {
     setAutoOffMinutes(minutes)
     mutation.mutate({ side: data.side, autoOffMinutes: minutes })
@@ -173,6 +211,41 @@ function SideCards({ data, presenceAvailable }: { data: SideData, presenceAvaila
             label={`Toggle away mode for ${sideLabel} side`}
           />
         </SettingRow>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Sleeper profile"
+          subtitle="Optional. Used only for sleep stages — the model was trained with age and sex. Stays on your pod."
+        />
+        <div className="grid grid-cols-[5rem_minmax(0,1fr)] items-end gap-3">
+          <label className="flex min-w-0 flex-col gap-1.5">
+            <span className="text-xs text-fg-2">Age</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={120}
+              value={age}
+              onChange={e => setAge(e.target.value)}
+              onBlur={handleAgeBlur}
+              onKeyDown={handleNameKeyDown}
+              disabled={isPending}
+              placeholder="—"
+              className="min-w-0 rounded-ctl border border-line-2 bg-field px-3 py-[9px] text-sm text-fg outline-none placeholder:text-fg-3 focus:border-fg-3 disabled:opacity-45"
+            />
+          </label>
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <span className="text-xs text-fg-2">Sex</span>
+            <SegmentedControl
+              full
+              ariaLabel={`Sex for ${sideLabel} side`}
+              value={sex ?? 'unset'}
+              options={SEX_OPTIONS.map(o => ({ ...o, disabled: isPending }))}
+              onChange={v => handleSexChange(v === 'unset' ? null : v)}
+            />
+          </div>
+        </div>
       </Card>
     </>
   )
