@@ -1003,4 +1003,34 @@ describe('system.getSensorSource', () => {
     // Stream fields stay live while the firmware half is frozen.
     expect(second.stream).toMatchObject({ source: 'nats', lastFrameAtMs: 9_000, lastFrameType: 'capSense', firstFrameMs: 1800 })
   })
+
+  it('does not memoize a probe cut short by its timeout, so the next poll retries', async () => {
+    const timedOut = Object.assign(new Error('spawn systemctl ETIMEDOUT'), { killed: true, signal: 'SIGTERM' })
+    routeExec((file, args) => {
+      if (file === 'mountpoint') return timedOut
+      if (file === 'systemctl' && args[0] === 'show') return 'not-found\n'
+      return exit(1)
+    })
+    fsPromisesMock.readFile.mockResolvedValue('#!/bin/sh\ncd /persistent/biometrics\nexec frank\n')
+
+    const first = await caller.getSensorSource({})
+    expect(first.firmware.generation).toBe('raw-filesystem')
+    expect(first.firmware.signals.biometricsTmpfsMounted).toBe(false)
+
+    // The tmpfs answers on the retry → the card corrects itself instead of staying wrong.
+    routeExec((file, args) => {
+      if (file === 'mountpoint') return undefined
+      if (file === 'systemctl' && args[0] === 'show') return 'not-found\n'
+      return exit(1)
+    })
+    execMock.execFile.mockClear()
+    const second = await caller.getSensorSource({})
+    expect(execMock.execFile).toHaveBeenCalledTimes(4)
+    expect(second.firmware.generation).toBe('raw-tmpfs-shim')
+
+    // Now settled: a third call spawns nothing.
+    execMock.execFile.mockClear()
+    await caller.getSensorSource({})
+    expect(execMock.execFile).not.toHaveBeenCalled()
+  })
 })
