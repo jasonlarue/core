@@ -60,6 +60,28 @@ async function collectFirmwareSignals(): Promise<FirmwareSignals> {
   }
 }
 
+let firmwareSignalsPromise: Promise<FirmwareSignals> | null = null
+
+/**
+ * Firmware signals cannot change while this process is alive (a firmware
+ * update reboots the pod), so the four process spawns and two file reads in
+ * `collectFirmwareSignals` happen once per process. The Settings → Device
+ * card polls `getSensorSource` every 10 s; only the stream fields are live.
+ * A service restart re-detects.
+ */
+export function getFirmwareSignals(): Promise<FirmwareSignals> {
+  firmwareSignalsPromise ??= collectFirmwareSignals().then((signals) => {
+    console.log('[system] firmware probed once: %s', classifyFirmware(signals))
+    return signals
+  })
+  return firmwareSignalsPromise
+}
+
+/** Test-only: forget the memoized probe so each case sees a fresh process. */
+export function _resetFirmwareSignalsForTest(): void {
+  firmwareSignalsPromise = null
+}
+
 const SENSOR_TRANSPORT_OVERRIDES = ['raw', 'nats'] as const
 
 /**
@@ -708,7 +730,7 @@ export const systemRouter = router({
       }),
     }))
     .query(async () => {
-      const signals = await collectFirmwareSignals()
+      const signals = await getFirmwareSignals()
       const generation = classifyFirmware(signals)
       const perf = getServerPerformance()
 
