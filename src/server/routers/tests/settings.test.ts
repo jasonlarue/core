@@ -20,7 +20,7 @@ const schedulerMock = vi.hoisted(() => {
     upsertPrimeJob: vi.fn(),
     upsertLedNightMode: vi.fn(async () => undefined),
     upsertAwayMode: vi.fn(),
-    syncMirroredSide: vi.fn(async () => undefined),
+    applyAwayMode: vi.fn(async () => undefined),
   }
   return { getJobManager: vi.fn(async () => jm), jm }
 })
@@ -127,7 +127,7 @@ beforeEach(() => {
   schedulerMock.jm.upsertPrimeJob.mockReset()
   schedulerMock.jm.upsertLedNightMode.mockReset().mockResolvedValue(undefined)
   schedulerMock.jm.upsertAwayMode.mockReset()
-  schedulerMock.jm.syncMirroredSide.mockReset().mockResolvedValue(undefined)
+  schedulerMock.jm.applyAwayMode.mockReset().mockResolvedValue(undefined)
   keepaliveMock.startKeepalive.mockReset()
   keepaliveMock.stopKeepalive.mockReset()
   autoOffMock.restartAutoOffTimers.mockReset()
@@ -703,7 +703,7 @@ describe('settings.updateSide — extra branches', () => {
     const current = { ...baseSide }
     dbState.txRowsQueue.push([current], [{ ...current, awayMode: true }])
     await caller.updateSide({ side: 'left', awayMode: true })
-    expect(schedulerMock.jm.syncMirroredSide).toHaveBeenCalledExactlyOnceWith('left')
+    expect(schedulerMock.jm.applyAwayMode).toHaveBeenCalledExactlyOnceWith('left')
   })
 
   it('does not sync when away mode is turned off, untouched or already on, and survives a sync failure', async () => {
@@ -717,9 +717,9 @@ describe('settings.updateSide — extra branches', () => {
     const alreadyAway = { ...current, awayMode: true }
     dbState.txRowsQueue.push([alreadyAway], [alreadyAway])
     await caller.updateSide({ side: 'left', awayMode: true })
-    expect(schedulerMock.jm.syncMirroredSide).not.toHaveBeenCalled()
+    expect(schedulerMock.jm.applyAwayMode).not.toHaveBeenCalled()
 
-    schedulerMock.jm.syncMirroredSide.mockRejectedValueOnce(new Error('hw down'))
+    schedulerMock.jm.applyAwayMode.mockRejectedValueOnce(new Error('hw down'))
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     dbState.txRowsQueue.push([current], [{ ...current, awayMode: true }])
     await caller.updateSide({ side: 'left', awayMode: true })

@@ -1522,6 +1522,27 @@ describe('JobManager residual mutation contracts', () => {
       expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
     })
 
+    it.each([new Error('settings unavailable'), 'settings unavailable'])('falls back to the schedule side when ownership cannot be read (%s)', async (failure) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(manager as any, 'awayModes').mockRejectedValue(failure)
+      await manager.runPowerOnJob({ ...power, onTemperature: null })
+      expect(control.powerOnLocked).toHaveBeenCalledExactlyOnceWith('left', 75)
+      expect(warn).toHaveBeenCalledWith('[jobManager] could not read away mode for left:', 'settings unavailable')
+    })
+
+    it.each([
+      { source: 'schedule', blocked: 'pump-stall', reason: 'pump-stall' },
+      { source: 'manual', blocked: null, reason: 'manual' },
+      { source: null, blocked: null, reason: 'no target' },
+    ])('reports why a mirrored temperature row is deferred ($reason)', async ({ source, blocked, reason }) => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+      control.reconcile.mockResolvedValueOnce({ source, blocked } as any)
+      selectReturns(awayRows(false, true))
+      await manager.runTemperatureJob({ ...row, id: 23, side: 'left', dayOfWeek: 'monday', time: '22:20', temperature: 68 })
+      expect(log).toHaveBeenCalledWith(`[jobManager] temperature schedule 23 deferred: ${reason}`)
+      expect(control.reconcile.mock.calls).toEqual([['left'], ['right']])
+    })
+
     it('drives only the row\'s own side when nobody is away', async () => {
       selectReturns(awayRows(false, false))
       await manager.runPowerOnJob(power)
@@ -1618,6 +1639,96 @@ describe('JobManager residual mutation contracts', () => {
       await manager.syncMirroredSide('left')
       expect(control.powerOnLocked).not.toHaveBeenCalled()
       expect(control.powerOffLocked).not.toHaveBeenCalled()
+    })
+
+    it.each([['left', 'right'], ['right', 'left']] as const)('cannot revive %s after %s shuts down while sync waits', async (away, sleeper) => {
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({
+        [away]: { awayMode: true }, [sleeper]: { awayMode: false },
+      })
+      let powered = true
+      vi.spyOn(manager as any, 'isSidePowered').mockImplementation(async () => powered)
+      let release!: () => void
+      control.powerOffLocked.mockImplementationOnce(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        powered = false
+      })
+      const shutdown = manager.runPowerOffJob({ ...power, side: sleeper })
+      await vi.waitFor(() => expect(control.powerOffLocked).toHaveBeenCalledWith(sleeper))
+      const sync = manager.syncMirroredSide(away)
+      // The sleeper is still powered, but shutdown owns its lock.
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      release()
+      await Promise.all([sync, shutdown])
+      expect(control.powerOnLocked).not.toHaveBeenCalled()
+    })
+
+    it('holds the sleeper lock until the mirror write finishes', async () => {
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
+      let release!: () => void
+      control.powerOnLocked.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        release = resolve
+      }))
+      const sync = manager.syncMirroredSide('right')
+      await vi.waitFor(() => expect(control.powerOnLocked).toHaveBeenCalled())
+      const shutdown = manager.runPowerOffJob(power)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(control.powerOffLocked).not.toHaveBeenCalled()
+      release()
+      await Promise.all([sync, shutdown])
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
+    })
+
+    it.each(['left', 'right'] as const)('completes both-away shutdown when %s goes away in Settings', async (side) => {
+      selectReturns(awayRows(true, true))
+      await manager.applyAwayMode(side)
+      expect(control.powerOffLocked.mock.calls).toEqual([[side === 'left' ? 'right' : 'left'], [side]])
+      expect(control.powerOnLocked).not.toHaveBeenCalled()
+    })
+
+    it('attempts the newly-away shutdown even if the former mirror fails', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const failure = new Error('mirror offline')
+      control.powerOffLocked.mockRejectedValueOnce(failure)
+      selectReturns(awayRows(true, true))
+      await manager.applyAwayMode('right')
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
+      expect(warn).toHaveBeenCalledWith('[awayMode] Failed to mirror right:', failure)
+    })
+
+    it('rechecks away ownership after waiting for both locks', async () => {
+      let modes = { left: { awayMode: true }, right: { awayMode: false } }
+      vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
+      vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
+      let release!: () => void
+      const held = withSideLock('left', () => new Promise<void>((resolve) => {
+        release = resolve
+      }))
+      await Promise.resolve()
+      const sync = manager.applyAwayMode('left')
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      modes = { left: { awayMode: true }, right: { awayMode: true } }
+      release()
+      await Promise.all([held, sync])
+      expect(control.powerOnLocked).not.toHaveBeenCalled()
+      expect(control.powerOffLocked.mock.calls).toEqual([['right'], ['left']])
+    })
+
+    it.each([{ targetRows: [] }, { targetRows: [{ target: null }] }])('uses the default mirror temperature without a saved target ($targetRows)', async ({ targetRows }) => {
+      vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
+      selectReturns(awayRows(false, true), targetRows)
+      await manager.syncMirroredSide('right')
+      expect(control.powerOnLocked).toHaveBeenCalledExactlyOnceWith('right', 75)
+    })
+
+    it('preserves non-Error hardware failures while attempting the mirror', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      control.powerOffLocked.mockRejectedValueOnce('offline')
+      selectReturns(awayRows(false, true))
+      await expect(manager.runPowerOffJob(power)).rejects.toBe('offline')
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
     })
 
     it('respects the pump-stall guard on the away side', async () => {
@@ -1866,12 +1977,11 @@ describe('JobManager residual mutation contracts', () => {
       update: () => ({ set: () => ({ where: () => ({ run: vi.fn() }) }) }),
     })) as any)
     vi.spyOn(console, 'log').mockImplementation(() => {})
-    const driven = vi.spyOn(manager as any, 'drivenSides').mockResolvedValue(['right', 'left'])
-    const sync = vi.spyOn(manager, 'syncMirroredSide').mockResolvedValue()
+    vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: true }, right: { awayMode: false } })
+    vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
     ;(manager as any).scheduleAwayMode('left', new Date(Date.now() + 60_000).toISOString(), null)
     await required(captured.get('away-start-left'), 'away-start-left').handler()
-    expect(driven).toHaveBeenCalledWith('right')
-    expect(sync).toHaveBeenCalledExactlyOnceWith('left')
+    expect(control.powerOnLocked).toHaveBeenCalledExactlyOnceWith('left', 75)
     expect(hardwareClient.setPower).not.toHaveBeenCalled()
     expect(control.powerOffLocked).not.toHaveBeenCalled()
   })

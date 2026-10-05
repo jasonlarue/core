@@ -556,7 +556,7 @@ export const settingsRouter = router({
         if (input.awayMode === true && !previous.awayMode) {
           try {
             const jobManager = await getJobManager()
-            await jobManager.syncMirroredSide(side)
+            await jobManager.applyAwayMode(side)
           }
           catch (e) {
             console.error('Single-sleeper mirror failed:', e)

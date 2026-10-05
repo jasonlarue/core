@@ -71,6 +71,7 @@ export class JobManager {
     return row?.isPowered ?? false
   }
 
+  /** Read the current schedule ownership for both sides. */
   private async awayModes(): Promise<Record<'left' | 'right', { awayMode: boolean | null }>> {
     const rows = await db.select({ side: sideSettings.side, awayMode: sideSettings.awayMode }).from(sideSettings)
     return Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])) as Record<'left' | 'right', { awayMode: boolean | null }>
@@ -132,30 +133,50 @@ export class JobManager {
    * turn it off here.
    */
   async syncMirroredSide(side: 'left' | 'right'): Promise<void> {
-    const modes = await this.awayModes()
+    await withSideLock('left', () => withSideLock('right', async () => {
+      await this.syncMirroredSideLocked(side, await this.awayModes())
+    }))
+  }
+
+  /** Apply the complete away-start transition for Settings and scheduled jobs. */
+  async applyAwayMode(side: 'left' | 'right'): Promise<void> {
+    await withSideLock('left', () => withSideLock('right', async () => {
+      const modes = await this.awayModes()
+      // Attempt both shutdowns even if the former mirror's hardware fails.
+      await this.syncMirroredSideLocked(side, modes)
+        .catch(e => console.warn(`[awayMode] Failed to mirror ${side}:`, e))
+      if (singleSleeperSideFor(modes)) return
+      await this.powerOffLocked(side)
+        .catch(e => console.warn(`[awayMode] Failed to power off ${side}:`, e))
+    }))
+  }
+
+  /** Synchronize from current ownership and power while holding left, then right. */
+  private async syncMirroredSideLocked(
+    side: 'left' | 'right',
+    modes: Awaited<ReturnType<JobManager['awayModes']>>,
+  ): Promise<void> {
     const single = singleSleeperSideFor(modes)
     if (!single) {
       const other = side === 'left' ? 'right' : 'left'
-      if (modes[side]?.awayMode && modes[other]?.awayMode) await this.powerOffForSchedule(other)
+      if (modes[side]?.awayMode && modes[other]?.awayMode) await this.powerOffForScheduleLocked(other)
       return
     }
     const away = single === 'left' ? 'right' : 'left'
     if (!(await this.isSidePowered(single))) {
-      await this.powerOffForSchedule(away)
+      await this.powerOffForScheduleLocked(away)
       return
     }
     const [home] = await db.select({ target: deviceState.targetTemperature }).from(deviceState).where(eq(deviceState.side, single)).limit(1)
-    await withSideLock(away, async () => {
-      if (pumpStallShouldBlock(away)) {
-        console.warn(`[jobManager] single-sleeper mirror: pump stall guard blocks ${away}`)
-        return
-      }
-      markSideMutated(away)
-      const client = getSharedHardwareClient()
-      await client.connect()
-      await getTemperatureController().powerOnLocked(away, home?.target ?? 75)
-      cancelAutoOffTimer(away)
-    })
+    if (pumpStallShouldBlock(away)) {
+      console.warn(`[jobManager] single-sleeper mirror: pump stall guard blocks ${away}`)
+      return
+    }
+    markSideMutated(away)
+    const client = getSharedHardwareClient()
+    await client.connect()
+    await getTemperatureController().powerOnLocked(away, home?.target ?? 75)
+    cancelAutoOffTimer(away)
   }
 
   /**
@@ -481,20 +502,25 @@ export class JobManager {
   }
 
   private async powerOffForSchedule(side: 'left' | 'right'): Promise<void> {
+    await withSideLock(side, () => this.powerOffForScheduleLocked(side))
+  }
+
+  /** Respect a run-once override before a recurring or mirrored shutdown. */
+  private async powerOffForScheduleLocked(side: 'left' | 'right'): Promise<void> {
     if (await this.hasActiveRunOnceSession(side)) {
       console.log(`Skipping recurring power-off job — run-once session active for ${side}`)
       return
     }
-    await withSideLock(side, async () => {
-      // Mark off in DB BEFORE hardware so any temp/alarm job that acquires
-      // the side lock after this one observes isPowered=false and skips its
-      // setTemperature command.
-      await this.markSideOff(side)
-      const client = getSharedHardwareClient()
-      await client.connect()
-      await getTemperatureController().powerOffLocked(side)
-      broadcastMutationStatus(side, { targetLevel: 0 })
-    })
+    await this.powerOffLocked(side)
+  }
+
+  /** Mark off before hardware so later lock holders cannot re-enable heat. */
+  private async powerOffLocked(side: 'left' | 'right'): Promise<void> {
+    await this.markSideOff(side)
+    const client = getSharedHardwareClient()
+    await client.connect()
+    await getTemperatureController().powerOffLocked(side)
+    broadcastMutationStatus(side, { targetLevel: 0 })
   }
 
   /**
@@ -728,26 +754,7 @@ export class JobManager {
                 .where(eq(sideSettings.side, side))
                 .run()
             })
-            // The other side still home: this side now mirrors that sleeper.
-            // Both away: the other side stops mirroring this one and goes off.
-            const mirrorsSleeper = (await this.drivenSides(side === 'left' ? 'right' : 'left')).includes(side)
-            await this.syncMirroredSide(side).catch(e => console.warn(`[awayMode] Failed to mirror ${side}:`, e))
-            if (mirrorsSleeper) return
-            // Power off the side — under the side lock, marking it off in
-            // the DB first so temp/alarm jobs queued behind this one observe
-            // isPowered=false and skip (same protocol as runPowerOffJob).
-            await withSideLock(side, async () => {
-              await this.markSideOff(side)
-              try {
-                const client = getSharedHardwareClient()
-                await client.connect()
-                await getTemperatureController().powerOffLocked(side)
-                broadcastMutationStatus(side, { targetLevel: 0 })
-              }
-              catch (e) {
-                console.warn(`[awayMode] Failed to power off ${side}:`, e)
-              }
-            })
+            await this.applyAwayMode(side)
           },
           { side },
         )

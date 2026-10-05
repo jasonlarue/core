@@ -1,6 +1,6 @@
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SideProvider, useSide } from '../SideProvider'
+import { SideProvider, useSide, useShownSides } from '../SideProvider'
 
 const state = vi.hoisted(() => ({
   sides: undefined as undefined | { left: { awayMode: boolean }, right: { awayMode: boolean } },
@@ -77,10 +77,37 @@ describe('SideProvider single-sleeper mode', () => {
     expect(localStorage.getItem('sleepypod-single-sleeper-side')).toBe('left')
   })
 
+  it.each(['left', 'right'] as const)('shows only the %s sleeper through the display hook', (side) => {
+    state.sides = away(side === 'right', side === 'left')
+    const { result } = renderHook(() => useShownSides(), { wrapper: SideProvider })
+    expect(result.current).toEqual([side])
+  })
+
   it('is per-side when both sides are away', () => {
     state.sides = away(true, true)
     render(tree())
     expect(ctx.singleSleeperSide).toBeNull()
     expect(ctx.selectedSide).toBe('left')
+  })
+  it('keeps the original selection when the single sleeper changes sides', () => {
+    localStorage.setItem('sleepypod-selected-side', 'right')
+    state.sides = away(false, true)
+    const { rerender } = render(tree())
+    act(() => ctx.selectSide('left'))
+    state.sides = away(true, false)
+    rerender(tree())
+    expect(ctx.selectedSide).toBe('both')
+    state.sides = away(false, false)
+    rerender(tree())
+    expect(ctx.selectedSide).toBe('right')
+  })
+
+  it.each([null, '{}', '{"side":"invalid"}', 'null'])('clears the mode marker without restoring an invalid selection (%s)', (prior) => {
+    localStorage.setItem('sleepypod-selected-side', 'right')
+    localStorage.setItem('sleepypod-single-sleeper-side', 'left')
+    if (prior !== null) localStorage.setItem('sleepypod-pre-single-sleeper-selection', prior)
+    render(tree())
+    expect(ctx.selectedSide).toBe('right')
+    expect(localStorage.getItem('sleepypod-single-sleeper-side')).toBeNull()
   })
 })

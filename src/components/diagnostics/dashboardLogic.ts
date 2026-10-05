@@ -66,7 +66,7 @@ export interface AttentionItem {
 export interface MaintenanceFacts {
   pumpStallProtectionEnabled: boolean
   /** False on pods that never report pump speed (Pod 3/4): the guard can't act there. */
-  reportsPumpSpeed?: boolean
+  reportsPumpSpeed?: boolean | null
   primePodDaily: boolean
   lastPrimeAt: number | null
 }

@@ -21,7 +21,7 @@ import { getDacMonitorIfRunning } from '@/src/hardware/dacMonitor.instance'
 import { getDatabaseIntegrity } from '@/src/db/integrity'
 import { getServerPerformance } from '@/src/lib/serverPerformance'
 import { getThermalHistory, THERMAL_RANGES, type ThermalRange } from '@/src/lib/thermalHistory'
-import { readThermalTruth } from '@/src/lib/thermalTruth'
+import { readThermalTruth, reportsPumpSpeed } from '@/src/lib/thermalTruth'
 import { getDataPath } from '@/src/lib/dataPathCollect'
 import { readHistory } from '@/src/lib/healthHistory'
 import { NODES, RESTARTABLE_UNITS, STAGES } from '@/src/lib/dataPath'
@@ -494,7 +494,7 @@ export const healthRouter = router({
     .input(z.object({}))
     .output(z.object({
       pumpStallProtectionEnabled: z.boolean(),
-      reportsPumpSpeed: z.boolean(),
+      reportsPumpSpeed: z.boolean().nullable(),
       heatsinkTempF: z.number().nullable(),
       ambientTempF: z.number().nullable(),
       sides: z.array(z.object({
@@ -622,7 +622,7 @@ export const healthRouter = router({
     .input(z.object({}))
     .output(z.object({
       pumpStallProtectionEnabled: z.boolean(),
-      reportsPumpSpeed: z.boolean(),
+      reportsPumpSpeed: z.boolean().nullable(),
       primePodDaily: z.boolean(),
       primePodTime: z.string().nullable(),
       lastPrimeAt: z.number().nullable(),
@@ -643,7 +643,7 @@ export const healthRouter = router({
       const [flow] = biometricsDb.select({ ts: flowReadings.timestamp }).from(flowReadings).limit(1).all()
       return {
         pumpStallProtectionEnabled: settings?.pumpStall ?? false,
-        reportsPumpSpeed: flow != null,
+        reportsPumpSpeed: reportsPumpSpeed(flow != null),
         primePodDaily: settings?.primePodDaily ?? false,
         primePodTime: settings?.primePodTime ?? null,
         lastPrimeAt: last?.ts ? last.ts.getTime() : null,
