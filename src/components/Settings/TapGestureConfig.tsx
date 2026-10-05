@@ -42,46 +42,49 @@ export function idleDescription(g: GestureRecord | undefined): string {
   return g.alarmInactiveBehavior === 'power' ? 'Power on / off' : 'Nothing'
 }
 
-/** What the gesture does while an alarm is ringing. */
+/**
+ * What the gesture does while an alarm is ringing — its own setting for any
+ * gesture (alarmBehavior); with none set the tap just stops the alarm, which
+ * the firmware does on any tap.
+ */
 export function ringingDescription(g: GestureRecord | undefined): string {
   if (!g) return 'Not set'
-  if (g.actionType === 'temperature') return temperatureLabel(g)
   if (g.alarmBehavior === 'snooze') return `Snooze ${Math.round((g.alarmSnoozeDuration ?? 300) / 60)} min`
   return 'Stop alarm'
 }
 
+/** The normal action: a temperature step, or (alarm-type rows) power toggle / nothing. */
+type IdleAction = 'temperature' | 'power' | 'none'
+
 interface EditState {
   side: Side
   tapType: TapType
-  actionType: ActionType
+  idle: IdleAction
   temperatureChange: 'increment' | 'decrement'
   temperatureAmount: number
-  alarmBehavior: 'snooze' | 'dismiss'
+  ringing: 'snooze' | 'dismiss'
   alarmSnoozeDuration: number
-  alarmInactiveBehavior: 'power' | 'none'
 }
 
 const defaultEditState = (side: Side, tapType: TapType): EditState => ({
   side,
   tapType,
-  actionType: 'temperature',
+  idle: 'temperature',
   temperatureChange: 'increment',
   temperatureAmount: 2,
-  alarmBehavior: 'snooze',
+  ringing: 'dismiss',
   alarmSnoozeDuration: 300,
-  alarmInactiveBehavior: 'none',
 })
 
 function editStateFromGesture(g: GestureRecord): EditState {
   return {
     side: g.side,
     tapType: g.tapType,
-    actionType: g.actionType,
+    idle: g.actionType === 'temperature' ? 'temperature' : g.alarmInactiveBehavior === 'power' ? 'power' : 'none',
     temperatureChange: g.temperatureChange ?? 'increment',
     temperatureAmount: g.temperatureAmount ?? 2,
-    alarmBehavior: g.alarmBehavior ?? 'snooze',
+    ringing: g.alarmBehavior ?? 'dismiss',
     alarmSnoozeDuration: g.alarmSnoozeDuration ?? 300,
-    alarmInactiveBehavior: g.alarmInactiveBehavior ?? 'none',
   }
 }
 
@@ -137,13 +140,19 @@ export function TapGestureConfig({ filterSide = 'left' }: { filterSide?: Side } 
   const handleSave = useCallback(() => {
     if (!editing) return
 
-    if (editing.actionType === 'temperature') {
+    // Both actions are saved together, whichever column opened the editor.
+    const ringing = {
+      alarmBehavior: editing.ringing,
+      alarmSnoozeDuration: editing.ringing === 'snooze' ? editing.alarmSnoozeDuration : undefined,
+    }
+    if (editing.idle === 'temperature') {
       setGesture.mutate({
         side: editing.side,
         tapType: editing.tapType,
         actionType: 'temperature',
         temperatureChange: editing.temperatureChange,
         temperatureAmount: editing.temperatureAmount,
+        ...ringing,
       })
     }
     else {
@@ -151,10 +160,8 @@ export function TapGestureConfig({ filterSide = 'left' }: { filterSide?: Side } 
         side: editing.side,
         tapType: editing.tapType,
         actionType: 'alarm',
-        alarmBehavior: editing.alarmBehavior,
-        alarmSnoozeDuration:
-          editing.alarmBehavior === 'snooze' ? editing.alarmSnoozeDuration : undefined,
-        alarmInactiveBehavior: editing.alarmInactiveBehavior,
+        ...ringing,
+        alarmInactiveBehavior: editing.idle,
       })
     }
   }, [editing, setGesture])
@@ -256,7 +263,8 @@ export function TapGestureConfig({ filterSide = 'left' }: { filterSide?: Side } 
 }
 
 /**
- * Body of the gesture editor: action type plus its parameters.
+ * Body of the gesture editor: the gesture's two independent actions — what
+ * it does normally, and what it does while an alarm is ringing.
  */
 function GestureEditPanel({
   state,
@@ -267,15 +275,15 @@ function GestureEditPanel({
 }) {
   return (
     <div className="flex flex-col gap-3">
+      <span className="text-xs text-fg-2">Normally</span>
       <SegmentedControl
         full
-        ariaLabel="Gesture action"
-        value={state.actionType}
-        options={[{ value: 'temperature', label: 'Temperature' }, { value: 'alarm', label: 'Alarm & power' }]}
-        onChange={actionType => onChange({ ...state, actionType })}
+        ariaLabel="Normally"
+        value={state.idle}
+        options={[{ value: 'temperature', label: 'Temperature' }, { value: 'power', label: 'Power on / off' }, { value: 'none', label: 'Nothing' }]}
+        onChange={idle => onChange({ ...state, idle })}
       />
-
-      {state.actionType === 'temperature' && (
+      {state.idle === 'temperature' && (
         <>
           <SettingRow label="Direction">
             <SegmentedControl
@@ -297,37 +305,25 @@ function GestureEditPanel({
         </>
       )}
 
-      {state.actionType === 'alarm' && (
-        <>
-          <SettingRow label="While ringing">
-            <SegmentedControl
-              ariaLabel="While ringing"
-              value={state.alarmBehavior}
-              options={[{ value: 'snooze', label: 'Snooze' }, { value: 'dismiss', label: 'Stop alarm' }]}
-              onChange={alarmBehavior => onChange({ ...state, alarmBehavior })}
-            />
-          </SettingRow>
-          {state.alarmBehavior === 'snooze' && (
-            <SettingRow label="Snooze for">
-              <Stepper
-                label="Snooze duration"
-                value={Math.round(state.alarmSnoozeDuration / 60)}
-                min={1}
-                max={10}
-                format={v => `${v} min`}
-                onChange={mins => onChange({ ...state, alarmSnoozeDuration: mins * 60 })}
-              />
-            </SettingRow>
-          )}
-          <SettingRow label="When no alarm">
-            <SegmentedControl
-              ariaLabel="When no alarm"
-              value={state.alarmInactiveBehavior}
-              options={[{ value: 'none', label: 'Nothing' }, { value: 'power', label: 'Power on / off' }]}
-              onChange={alarmInactiveBehavior => onChange({ ...state, alarmInactiveBehavior })}
-            />
-          </SettingRow>
-        </>
+      <span className="mt-2 border-t border-line pt-3.5 text-xs text-fg-2">While an alarm is ringing</span>
+      <SegmentedControl
+        full
+        ariaLabel="While an alarm is ringing"
+        value={state.ringing}
+        options={[{ value: 'snooze', label: 'Snooze' }, { value: 'dismiss', label: 'Stop alarm' }]}
+        onChange={ringing => onChange({ ...state, ringing })}
+      />
+      {state.ringing === 'snooze' && (
+        <SettingRow label="Snooze for">
+          <Stepper
+            label="Snooze duration"
+            value={Math.round(state.alarmSnoozeDuration / 60)}
+            min={1}
+            max={10}
+            format={v => `${v} min`}
+            onChange={mins => onChange({ ...state, alarmSnoozeDuration: mins * 60 })}
+          />
+        </SettingRow>
       )}
     </div>
   )

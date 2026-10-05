@@ -667,6 +667,9 @@ export const settingsRouter = router({
             actionType: z.literal('temperature'),
             temperatureChange: z.enum(['increment', 'decrement']),
             temperatureAmount: z.number().int().min(0).max(10),
+            // What the tap does while an alarm is ringing (any action type).
+            alarmBehavior: z.enum(['snooze', 'dismiss']).optional(),
+            alarmSnoozeDuration: z.number().int().min(60).max(600).optional(),
           })
           .strict(),
         z

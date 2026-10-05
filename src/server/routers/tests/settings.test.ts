@@ -553,6 +553,24 @@ describe('settings.setGesture / deleteGesture', () => {
     expect(out.id).toBe(1)
   })
 
+  it('accepts a ringing action on a temperature gesture', async () => {
+    const created = {
+      id: 2, side: 'left', tapType: 'tripleTap', actionType: 'temperature',
+      temperatureChange: 'increment', temperatureAmount: 2, alarmBehavior: 'snooze', alarmSnoozeDuration: 420,
+      createdAt: new Date(0), updatedAt: new Date(0),
+    }
+    dbState.txRowsQueue.push([], [created])
+    const out = await caller.setGesture({
+      side: 'left', tapType: 'tripleTap', actionType: 'temperature',
+      temperatureChange: 'increment', temperatureAmount: 2, alarmBehavior: 'snooze', alarmSnoozeDuration: 420,
+    })
+    expect(out).toMatchObject({ alarmBehavior: 'snooze', alarmSnoozeDuration: 420 })
+    await expect(caller.setGesture({
+      side: 'left', tapType: 'tripleTap', actionType: 'temperature',
+      temperatureChange: 'increment', temperatureAmount: 2, alarmBehavior: 'ring' as never,
+    })).rejects.toThrow()
+  })
+
   it('updates an alarm gesture when one already exists', async () => {
     const existing = { id: 5, side: 'left', tapType: 'doubleTap' }
     const updated = {

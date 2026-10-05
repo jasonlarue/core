@@ -61,8 +61,12 @@ export const DEFAULT_SNOOZE_ALARM: AlarmConfig = {
  * kept by alarmState: every path that starts an alarm marks it vibrating
  * and it is cleared when the alarm stops or its duration runs out.
  *
- * The firmware itself stops a vibrating alarm on any tap gesture, so a
- * gesture that isn't an alarm action still marks the alarm ended.
+ * Each tap has two actions: what it does normally (actionType: a
+ * temperature step, or alarmInactiveBehavior's power toggle / nothing) and
+ * what it does while an alarm is ringing (alarmBehavior: snooze or stop),
+ * for any actionType. While ringing a tap only does the latter — the
+ * firmware itself stops a vibrating alarm on any tap, so a tap with no
+ * ringing action just records the alarm ended.
  *
  * Pass `deps` to override DB/hardware behaviour in tests (dependency injection).
  */
@@ -90,10 +94,12 @@ export class GestureActionHandler {
 
   private execute = async (event: GestureEvent): Promise<void> => {
     const gesture = await this.deps.findGestureConfig(event.side, event.tapType)
-    if (gesture?.actionType !== 'alarm') {
-      // The firmware already stopped any vibrating alarm on this tap.
-      const state = await this.deps.findDeviceState(event.side)
-      if (state?.isAlarmVibrating) await this.deps.alarm.ended(event.side)
+    const state = await this.deps.findDeviceState(event.side)
+    if (state?.isAlarmVibrating) {
+      if (gesture?.alarmBehavior) await this.handleRingingAction(event, gesture)
+      // The firmware already stopped the alarm on this tap.
+      else await this.deps.alarm.ended(event.side)
+      return
     }
     if (!gesture) return
 
@@ -101,7 +107,7 @@ export class GestureActionHandler {
       await this.handleTemperatureAction(event, gesture)
     }
     else if (gesture.actionType === 'alarm') {
-      await this.handleAlarmAction(event, gesture)
+      await this.handleIdleAlarmAction(event, gesture)
     }
   }
 
@@ -132,62 +138,56 @@ export class GestureActionHandler {
     })
   }
 
-  private handleAlarmAction = async (
+  /** A tap while an alarm is ringing: snooze or stop it. */
+  private handleRingingAction = async (
     event: GestureEvent,
     gesture: TapGestureRow
   ): Promise<void> => {
-    const state = await this.deps.findDeviceState(event.side)
-    const isAlarmVibrating = state?.isAlarmVibrating ?? false
+    const client = this.deps.newHardwareClient(this.socketPath)
+    try {
+      await client.connect()
+      if (gesture.alarmBehavior === 'snooze') {
+        // Read before ended() forgets it: the snoozed alarm comes back as it was.
+        const config = this.deps.alarm.activeConfig(event.side) ?? DEFAULT_SNOOZE_ALARM
+        await client.clearAlarm(event.side)
+        await this.deps.alarm.ended(event.side)
+        this.deps.alarm.snooze(event.side, gesture.alarmSnoozeDuration ?? 300, config)
+      }
+      else {
+        await client.clearAlarm(event.side)
+        this.deps.alarm.cancelSnooze(event.side)
+        await this.deps.alarm.ended(event.side)
+      }
+    }
+    finally {
+      client.disconnect()
+    }
+  }
 
-    if (isAlarmVibrating) {
+  /** An alarm-type tap with no alarm ringing: toggle power, or nothing. */
+  private handleIdleAlarmAction = async (
+    event: GestureEvent,
+    gesture: TapGestureRow
+  ): Promise<void> => {
+    if (gesture.alarmInactiveBehavior !== 'power') return
+    await withSideLock(event.side, async () => {
+      // Resolve the toggle after older queued commands have updated state.
+      const current = await this.deps.findDeviceState(event.side)
+      const nextPowered = !(current?.isPowered ?? false)
+      const target = current?.targetTemperature ?? 75
+      if (nextPowered && pumpStallShouldBlock(event.side)) {
+        console.warn(`[gestureActionHandler] skipped power-on: pump stall guard blocks ${event.side}`)
+        return
+      }
       const client = this.deps.newHardwareClient(this.socketPath)
       try {
         await client.connect()
-
-        if (gesture.alarmBehavior === 'dismiss') {
-          await client.clearAlarm(event.side)
-          this.deps.alarm.cancelSnooze(event.side)
-          await this.deps.alarm.ended(event.side)
-        }
-        else if (gesture.alarmBehavior === 'snooze') {
-          // Read before ended() forgets it: the snoozed alarm comes back as it was.
-          const config = this.deps.alarm.activeConfig(event.side) ?? DEFAULT_SNOOZE_ALARM
-          await client.clearAlarm(event.side)
-          await this.deps.alarm.ended(event.side)
-          this.deps.alarm.snooze(event.side, gesture.alarmSnoozeDuration ?? 300, config)
-        }
-        else {
-          // No alarm behavior configured: the firmware still stopped it.
-          await this.deps.alarm.ended(event.side)
-        }
+        if (nextPowered) await getTemperatureController().setManualLocked(event.side, target)
+        else await getTemperatureController().powerOffLocked(event.side)
       }
       finally {
         client.disconnect()
       }
-    }
-    else {
-      if (gesture.alarmInactiveBehavior === 'power') {
-        await withSideLock(event.side, async () => {
-          // Resolve the toggle after older queued commands have updated state.
-          const current = await this.deps.findDeviceState(event.side)
-          const nextPowered = !(current?.isPowered ?? false)
-          const target = current?.targetTemperature ?? 75
-          if (nextPowered && pumpStallShouldBlock(event.side)) {
-            console.warn(`[gestureActionHandler] skipped power-on: pump stall guard blocks ${event.side}`)
-            return
-          }
-          const client = this.deps.newHardwareClient(this.socketPath)
-          try {
-            await client.connect()
-            if (nextPowered) await getTemperatureController().setManualLocked(event.side, target)
-            else await getTemperatureController().powerOffLocked(event.side)
-          }
-          finally {
-            client.disconnect()
-          }
-        })
-      }
-      // alarmInactiveBehavior === 'none': no-op
-    }
+    })
   }
 }

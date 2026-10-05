@@ -287,23 +287,47 @@ describe('GestureActionHandler', () => {
 
       await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('right', 'quadTap'))
 
-      expect(client.connect).toHaveBeenCalledOnce()
+      expect(deps.newHardwareClient).not.toHaveBeenCalled()
       expect(client.clearAlarm).not.toHaveBeenCalled()
       expect(alarm.ended).toHaveBeenCalledWith('right')
       expect(alarm.snooze).not.toHaveBeenCalled()
-      expect(client.disconnect).toHaveBeenCalledOnce()
     })
   })
 
   describe('other gestures during a vibrating alarm', () => {
-    test('a temperature gesture records the alarm stopped and still adjusts temperature', async () => {
-      const gesture = { actionType: 'temperature', temperatureChange: 'increment', temperatureAmount: 2 }
+    test('a temperature gesture with no ringing action only records the alarm stopped', async () => {
+      // While an alarm rings a tap is about the alarm, not the temperature.
+      const gesture = { actionType: 'temperature', temperatureChange: 'increment', temperatureAmount: 2, alarmBehavior: null }
       const { deps, client, alarm } = makeDeps(gesture, { isAlarmVibrating: true, targetTemperature: 70 })
 
       await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'tripleTap'))
 
       expect(alarm.ended).toHaveBeenCalledWith('left')
-      expect(client.setTemperature).toHaveBeenCalledWith('left', 72)
+      expect(client.setTemperature).not.toHaveBeenCalled()
+    })
+
+    test('a temperature gesture can snooze while ringing and still step temperature otherwise', async () => {
+      const gesture = { actionType: 'temperature', temperatureChange: 'increment', temperatureAmount: 2, alarmBehavior: 'snooze', alarmSnoozeDuration: 420 }
+      const ringing = makeDeps(gesture, { isAlarmVibrating: true, targetTemperature: 70 })
+      await new GestureActionHandler(SOCKET_PATH, ringing.deps).handle(makeEvent('left', 'doubleTap'))
+      expect(ringing.client.clearAlarm).toHaveBeenCalledWith('left')
+      expect(ringing.alarm.snooze).toHaveBeenCalledWith('left', 420, expect.anything())
+      expect(ringing.client.setTemperature).not.toHaveBeenCalled()
+
+      const idle = makeDeps(gesture, { isAlarmVibrating: false, targetTemperature: 70 })
+      await new GestureActionHandler(SOCKET_PATH, idle.deps).handle(makeEvent('left', 'doubleTap'))
+      expect(idle.client.setTemperature).toHaveBeenCalledWith('left', 72)
+      expect(idle.alarm.snooze).not.toHaveBeenCalled()
+    })
+
+    test('a temperature gesture can stop the alarm while ringing', async () => {
+      const gesture = { actionType: 'temperature', temperatureChange: 'decrement', temperatureAmount: 1, alarmBehavior: 'dismiss' }
+      const { deps, client, alarm } = makeDeps(gesture, { isAlarmVibrating: true, targetTemperature: 70 })
+      await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'quadTap'))
+      expect(client.clearAlarm).toHaveBeenCalledWith('left')
+      expect(alarm.cancelSnooze).toHaveBeenCalledWith('left')
+      expect(alarm.ended).toHaveBeenCalledWith('left')
+      expect(client.setTemperature).not.toHaveBeenCalled()
     })
 
     test('an unconfigured gesture still records the alarm stopped', async () => {

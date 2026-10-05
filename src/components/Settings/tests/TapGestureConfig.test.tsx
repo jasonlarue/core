@@ -53,12 +53,15 @@ describe('gesture descriptions', () => {
     expect(ringingDescription(undefined)).toBe('Not set')
   })
 
-  it('shows temperature changes the same in both contexts', () => {
+  it('describes the normal and ringing actions independently', () => {
     expect(idleDescription(gesture({}))).toBe('Temperature +2°')
-    expect(ringingDescription(gesture({ temperatureChange: 'decrement', temperatureAmount: 1 }))).toBe('Temperature −1°')
+    // A temperature tap with no ringing action stops the alarm (the firmware does on any tap).
+    expect(ringingDescription(gesture({}))).toBe('Stop alarm')
+    expect(ringingDescription(gesture({ alarmBehavior: 'snooze', alarmSnoozeDuration: 420 }))).toBe('Snooze 7 min')
+    expect(idleDescription(gesture({ alarmBehavior: 'snooze' }))).toBe('Temperature +2°')
   })
 
-  it('describes alarm gestures by context', () => {
+  it('describes alarm-type gestures by context', () => {
     const snooze = gesture({ actionType: 'alarm', alarmBehavior: 'snooze', alarmSnoozeDuration: 420, alarmInactiveBehavior: 'power' })
     expect(ringingDescription(snooze)).toBe('Snooze 7 min')
     expect(idleDescription(snooze)).toBe('Power on / off')
@@ -69,7 +72,7 @@ describe('gesture descriptions', () => {
 })
 
 describe('TapGestureConfig', () => {
-  it('saves a new temperature gesture with the default payload', () => {
+  it('saves a new gesture: +2° normally, stop the alarm while ringing', () => {
     render(<TapGestureConfig filterSide="right" />)
     fireEvent.click(screen.getByLabelText('Triple tap: Not set'))
     fireEvent.click(screen.getByText('Save'))
@@ -79,15 +82,49 @@ describe('TapGestureConfig', () => {
       actionType: 'temperature',
       temperatureChange: 'increment',
       temperatureAmount: 2,
+      alarmBehavior: 'dismiss',
+      alarmSnoozeDuration: undefined,
     })
   })
 
-  it('saves an alarm gesture, omitting snooze duration when dismissing', () => {
+  it('changing the ringing action keeps the normal temperature action', () => {
+    trpcMock.state.gestures = { left: [gesture({ temperatureAmount: 3 })], right: [] }
+    render(<TapGestureConfig filterSide="left" />)
+    fireEvent.click(screen.getByLabelText('Double tap while ringing: Stop alarm'))
+    fireEvent.click(screen.getByText('Snooze'))
+    fireEvent.click(screen.getByText('Save'))
+    expect(trpcMock.setMutate).toHaveBeenCalledWith({
+      side: 'left',
+      tapType: 'doubleTap',
+      actionType: 'temperature',
+      temperatureChange: 'increment',
+      temperatureAmount: 3,
+      alarmBehavior: 'snooze',
+      alarmSnoozeDuration: 300,
+    })
+  })
+
+  it('changing the normal action keeps the ringing action', () => {
+    trpcMock.state.gestures = { left: [gesture({ alarmBehavior: 'snooze', alarmSnoozeDuration: 420 })], right: [] }
+    render(<TapGestureConfig filterSide="left" />)
+    fireEvent.click(screen.getByLabelText('Double tap: Temperature +2°'))
+    fireEvent.click(screen.getByText('Power on / off'))
+    fireEvent.click(screen.getByText('Save'))
+    expect(trpcMock.setMutate).toHaveBeenCalledWith({
+      side: 'left',
+      tapType: 'doubleTap',
+      actionType: 'alarm',
+      alarmBehavior: 'snooze',
+      alarmSnoozeDuration: 420,
+      alarmInactiveBehavior: 'power',
+    })
+  })
+
+  it('saves nothing normally and stop while ringing, omitting the snooze duration', () => {
     render(<TapGestureConfig filterSide="left" />)
     fireEvent.click(screen.getByLabelText('Quad tap while ringing: Not set'))
-    fireEvent.click(screen.getByText('Alarm & power'))
+    fireEvent.click(screen.getByText('Nothing'))
     fireEvent.click(screen.getByText('Stop alarm'))
-    fireEvent.click(screen.getByText('Power on / off'))
     fireEvent.click(screen.getByText('Save'))
     expect(trpcMock.setMutate).toHaveBeenCalledWith({
       side: 'left',
@@ -95,7 +132,7 @@ describe('TapGestureConfig', () => {
       actionType: 'alarm',
       alarmBehavior: 'dismiss',
       alarmSnoozeDuration: undefined,
-      alarmInactiveBehavior: 'power',
+      alarmInactiveBehavior: 'none',
     })
   })
 
