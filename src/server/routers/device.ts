@@ -15,6 +15,7 @@ import { markSideMutated } from '@/src/hardware/deviceStateSync'
 import { getLastSideMutationAt } from '@/src/hardware/sideMutations'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { getTemperatureController, getTemperatureControlStatus } from '@/src/temperature/instance'
+import { getJobManager } from '@/src/scheduler'
 import { holdMinutesSchema, temperatureControlStatusSchema } from '@/src/temperature/schema'
 import {
   sideSchema,
@@ -436,6 +437,10 @@ export const deviceRouter = router({
           assertPumpStallNotBlocked(input.side)
         }
         if (input.powered) {
+          // The user wants the bed on: a power-off held for an alarm must
+          // not switch it off once the alarm is over.
+          const jobManager = await getJobManager()
+          jobManager.releaseHeldPowerOff(input.side)
           if (input.temperature === undefined) await getTemperatureController().powerOnLocked(input.side)
           else await getTemperatureController().setManualLocked(input.side, input.temperature)
         }

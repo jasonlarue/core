@@ -81,6 +81,10 @@ const controllerMock = vi.hoisted(() => ({
   status: vi.fn(),
 }))
 
+const jobManagerMock = vi.hoisted(() => ({
+  releaseHeldPowerOff: vi.fn(),
+}))
+
 const dbState = vi.hoisted(() => ({
   rowsQueue: [] as unknown[][],
   pop(): unknown[] { return dbState.rowsQueue.shift() ?? [] },
@@ -170,6 +174,7 @@ vi.mock('@/src/db', () => ({
   biometricsDb: biometricsDbMock,
 }))
 vi.mock('@/src/hardware/wifi', () => wifiMock)
+vi.mock('@/src/scheduler', () => ({ getJobManager: async () => jobManagerMock }))
 
 const { deviceRouter } = await import('@/src/server/routers/device')
 const { withSideLock } = await import('@/src/hardware/sideLock')
@@ -197,6 +202,7 @@ beforeEach(() => {
   })
   helpersMock.client.setPower.mockResolvedValue(undefined)
   helpersMock.client.setTemperature.mockResolvedValue(undefined)
+  jobManagerMock.releaseHeldPowerOff.mockClear()
   helpersMock.client.setAlarm.mockResolvedValue(undefined)
   helpersMock.client.clearAlarm.mockResolvedValue(undefined)
   helpersMock.client.startPriming.mockResolvedValue(undefined)
@@ -675,6 +681,14 @@ describe('temperature controller API', () => {
     expect(controllerMock.setManualLocked.mock.calls).toEqual([['left', 72]])
     expect(controllerMock.powerOnLocked).toHaveBeenCalledExactlyOnceWith('right')
     expect(dbMock.update).not.toHaveBeenCalled()
+  })
+
+  it('releases a power-off held for an alarm on power-on only', async () => {
+    await caller.setPower({ side: 'left', powered: true })
+    await caller.setPower({ side: 'right', powered: true, temperature: 72 })
+    expect(jobManagerMock.releaseHeldPowerOff.mock.calls).toEqual([['left'], ['right']])
+    await caller.setPower({ side: 'left', powered: false })
+    expect(jobManagerMock.releaseHeldPowerOff).toHaveBeenCalledTimes(2)
   })
 
   it('never gates shutdown behind pump protection', async () => {

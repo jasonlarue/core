@@ -111,6 +111,7 @@ import { broadcastMutationStatus } from '@/src/streaming/broadcastMutationStatus
 import { withSideLock } from '@/src/hardware/sideLock'
 import { JobManager } from '../jobManager'
 import { JobType } from '../types'
+import { ALARM_HOLD_AFTER_MIN } from '@/src/temperature/baseline'
 
 /**
  * Count reload cycles by spying on Scheduler.cancelRecurringJobs, which is
@@ -1595,8 +1596,8 @@ describe('JobManager residual mutation contracts', () => {
       const [id, type, fireDate] = schedule.mock.calls[0]
       expect(id).toBe('power-off-after-alarm-left')
       expect(type).toBe(JobType.POWER_OFF)
-      // Alarm in 10 min + 120 s vibration + 1 min.
-      expect(fireDate.getTime()).toBe(Date.now() + 10 * 60_000 + 120_000 + 60_000)
+      // Alarm in 10 min + 120 s vibration + the 15 min temperature hold.
+      expect(fireDate.getTime()).toBe(Date.now() + 10 * 60_000 + 120_000 + ALARM_HOLD_AFTER_MIN * 60_000)
       await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
       expect(control.powerOffLocked).toHaveBeenCalledWith('left')
     })
@@ -1621,6 +1622,37 @@ describe('JobManager residual mutation contracts', () => {
       vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockReturnValue(null)
       await manager.runPowerOffJob(power)
       expect(control.powerOffLocked).toHaveBeenCalledWith('left')
+    })
+
+    describe('a held power-off is released', () => {
+      const heldJob = () => manager.getScheduler().getJob('power-off-after-alarm-left')
+
+      beforeEach(async () => {
+        alarmIn(10)
+        await manager.runPowerOffJob(power)
+        expect(heldJob()?.metadata).toEqual({ scheduleId: 31, side: 'left' })
+      })
+
+      it('by the scheduled power-on, so the bed stays on after the alarm', async () => {
+        await manager.runPowerOnJob(power)
+        expect(control.powerOnLocked).toHaveBeenCalledWith('left', 80)
+        expect(heldJob()).toBeUndefined()
+      })
+
+      it('by an explicit power-on on that side only', () => {
+        manager.releaseHeldPowerOff('right')
+        expect(heldJob()).toBeDefined()
+        manager.releaseHeldPowerOff('left')
+        expect(heldJob()).toBeUndefined()
+        expect(control.powerOffLocked).not.toHaveBeenCalled()
+      })
+
+      it('when its power schedule is disabled, not another one', () => {
+        manager.cancelPowerJob(32)
+        expect(heldJob()).toBeDefined()
+        manager.cancelPowerJob(31)
+        expect(heldJob()).toBeUndefined()
+      })
     })
   })
 

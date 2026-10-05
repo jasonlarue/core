@@ -7,9 +7,10 @@
  * - The sensor stream: firmware that has them writes a `tap-gesture` record
  *   ({side, taps, ts}) for every tap, alarm or not.
  *
- * Once the stream has delivered a tap it is the only source (status taps are
- * then redundant, and incomplete). Before that, a tap reported by both — the
- * status field holds the same firmware time as the record — is handled once.
+ * While the stream is delivering taps it is the only source (status taps are
+ * then redundant, and incomplete). Before that, and should the stream drop
+ * while status polling goes on, a tap reported by both — the status field
+ * holds the same firmware time as the record — is handled once.
  */
 import type { GestureEvent } from './dacMonitor'
 
@@ -25,6 +26,14 @@ export const TAP_RECORD_MAX_AGE_S = 30
 /** How long a handled tap's identity is remembered for de-duplication. */
 const SEEN_TTL_MS = 5 * 60 * 1000
 
+/**
+ * How long after a stream tap status taps stay suppressed: several status
+ * polls (every 1-5 s), so the status copy of that tap is skipped, yet a
+ * stream that stops delivering hands taps back to status polling instead of
+ * ignoring every tap until a restart.
+ */
+export const STREAM_TAP_FRESH_MS = 30_000
+
 /** The gesture a `tap-gesture` sensor frame describes, or null. */
 export function tapGestureEvent(frame: Record<string, unknown>, nowMs = Date.now()): GestureEvent | null {
   if (frame.type !== 'tap-gesture') return null
@@ -39,7 +48,7 @@ export function tapGestureEvent(frame: Record<string, unknown>, nowMs = Date.now
 }
 
 export class GestureDispatcher {
-  private streamSeen = false
+  private streamSeenAt: number | null = null
   private readonly seen = new Map<string, number>()
 
   constructor(
@@ -49,13 +58,13 @@ export class GestureDispatcher {
 
   /** A tap detected from status polling. */
   fromStatus = (event: GestureEvent): void => {
-    if (this.streamSeen) return
+    if (this.streamSeenAt !== null && this.now() - this.streamSeenAt <= STREAM_TAP_FRESH_MS) return
     this.deliverOnce(event)
   }
 
   /** A tap from a `tap-gesture` sensor record. */
   fromStream = (event: GestureEvent): void => {
-    this.streamSeen = true
+    this.streamSeenAt = this.now()
     this.deliverOnce(event)
   }
 

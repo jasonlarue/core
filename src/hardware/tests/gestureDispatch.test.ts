@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GestureEvent } from '../dacMonitor'
-import { GestureDispatcher, TAP_RECORD_MAX_AGE_S, tapGestureEvent } from '../gestureDispatch'
+import { GestureDispatcher, STREAM_TAP_FRESH_MS, TAP_RECORD_MAX_AGE_S, tapGestureEvent } from '../gestureDispatch'
 
 const NOW_S = 1_790_680_560
 
@@ -51,13 +51,28 @@ describe('GestureDispatcher', () => {
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ tapType: 'doubleTap' }))
   })
 
-  it('once the stream has delivered a tap, status taps are ignored', () => {
+  it('while the stream is delivering taps, status taps are ignored', () => {
     const deliver = vi.fn()
-    const d = new GestureDispatcher(deliver, () => NOW_S * 1000)
-    d.fromStream(tap('doubleTap', NOW_S - 60))
-    d.fromStatus(tap('tripleTap', NOW_S))
+    let now = NOW_S * 1000
+    const d = new GestureDispatcher(deliver, () => now)
+    d.fromStream(tap('doubleTap', NOW_S))
+    now += STREAM_TAP_FRESH_MS
+    d.fromStatus(tap('tripleTap', NOW_S + 5))
     d.fromStatus(tap('quadTap'))
     expect(deliver).toHaveBeenCalledOnce()
+  })
+
+  it('takes status taps again once the stream has gone quiet', () => {
+    const deliver = vi.fn()
+    let now = NOW_S * 1000
+    const d = new GestureDispatcher(deliver, () => now)
+    d.fromStream(tap('doubleTap', NOW_S))
+    now += STREAM_TAP_FRESH_MS + 1
+    d.fromStatus(tap('tripleTap', NOW_S + 31))
+    expect(deliver).toHaveBeenCalledTimes(2)
+    d.fromStream(tap('quadTap', NOW_S + 40))
+    d.fromStatus(tap('doubleTap', NOW_S + 41))
+    expect(deliver).toHaveBeenCalledTimes(3)
   })
 
   it('without firmware times, status taps are each delivered', () => {

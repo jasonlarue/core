@@ -70,7 +70,10 @@ it the schedule applies.
 
 A scheduled power-off that lands inside a warm-up would switch the bed off
 before the alarm, so it is held as a one-time `power-off-after-alarm-<side>`
-job until the alarm has finished (its time plus vibration, plus a minute).
+job until the alarm's temperature span ends (its time plus vibration, plus
+`ALARM_HOLD_AFTER_MIN`), so a snooze re-fires into a bed that is still on.
+An explicit power-on in the meantime (a scheduled power-on, the app, HomeKit,
+away mode ending) or disabling the power schedule releases the held job.
 
 ## The documented alarm opcodes
 

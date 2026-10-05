@@ -23,7 +23,7 @@ import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGua
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
 import { WakeWindows, slotBefore } from './wakeWindow'
-import { alarmWarmupMinutes } from '@/src/temperature/baseline'
+import { ALARM_HOLD_AFTER_MIN, alarmWarmupMinutes } from '@/src/temperature/baseline'
 
 const HEARTBEAT_INTERVAL_MS_DEFAULT = 60_000
 const HEARTBEAT_STALE_MS_DEFAULT = 90_000
@@ -364,6 +364,7 @@ export class JobManager {
         return
       }
       markSideMutated(sched.side)
+      this.releaseHeldPowerOff(sched.side)
       const client = getSharedHardwareClient()
       await client.connect()
       await getTemperatureController().powerOnLocked(sched.side, sched.onTemperature ?? 75)
@@ -406,8 +407,10 @@ export class JobManager {
   }
 
   /**
-   * When `side` is in (or within) an alarm's warm-up, the time that alarm
-   * has finished (its time plus vibration, plus a minute), else null.
+   * When `side` is in (or within) an alarm's warm-up, the time that alarm's
+   * temperature span ends (its time plus vibration, plus ALARM_HOLD_AFTER_MIN,
+   * the same window alarmTemperatureTargets holds the temperature for, so a
+   * snooze re-fires into a bed that is still on), else null.
    */
   private async alarmWarmupEnd(side: 'left' | 'right'): Promise<number | null> {
     const alarms = await db.select().from(alarmSchedules)
@@ -417,9 +420,20 @@ export class JobManager {
     for (const alarm of alarms) {
       const at = this.scheduler.getNextInvocation(`alarm-${alarm.id}`)?.getTime()
       if (at === undefined || at - now > alarmWarmupMinutes(alarm.wakeWindow) * 60_000) continue
-      end = Math.max(end ?? 0, at + alarm.duration * 1000 + 60_000)
+      end = Math.max(end ?? 0, at + alarm.duration * 1000 + ALARM_HOLD_AFTER_MIN * 60_000)
     }
     return end
+  }
+
+  /**
+   * Drop a power-off held for an alarm on `side`: an explicit power-on since
+   * then means the user wants the bed on, and the held job must not switch
+   * it off behind their back once the alarm is over.
+   */
+  releaseHeldPowerOff(side: 'left' | 'right'): void {
+    if (this.scheduler.cancelJob(`power-off-after-alarm-${side}`)) {
+      console.log(`[jobManager] released the power-off held for the ${side} alarm`)
+    }
   }
 
   private async powerOffAfterAlarm(sched: typeof powerSchedules.$inferSelect): Promise<void> {
@@ -749,6 +763,7 @@ export class JobManager {
                 return
               }
               try {
+                this.releaseHeldPowerOff(side)
                 const client = getSharedHardwareClient()
                 await client.connect()
                 await getTemperatureController().powerOnLocked(side)
@@ -947,6 +962,11 @@ export class JobManager {
   cancelPowerJob(id: number): void {
     this.scheduler.cancelJob(`power-on-${id}`)
     this.scheduler.cancelJob(`power-off-${id}`)
+    for (const side of ['left', 'right'] as const) {
+      if (this.scheduler.getJob(`power-off-after-alarm-${side}`)?.metadata?.scheduleId === id) {
+        this.releaseHeldPowerOff(side)
+      }
+    }
   }
 
   /**
