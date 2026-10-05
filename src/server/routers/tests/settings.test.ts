@@ -703,15 +703,20 @@ describe('settings.updateSide — extra branches', () => {
     const current = { ...baseSide }
     dbState.txRowsQueue.push([current], [{ ...current, awayMode: true }])
     await caller.updateSide({ side: 'left', awayMode: true })
-    expect(schedulerMock.jm.syncMirroredSide).toHaveBeenCalledOnce()
+    expect(schedulerMock.jm.syncMirroredSide).toHaveBeenCalledExactlyOnceWith('left')
   })
 
-  it('does not sync when away mode is turned off or untouched, and survives a sync failure', async () => {
+  it('does not sync when away mode is turned off, untouched or already on, and survives a sync failure', async () => {
     const current = { ...baseSide }
     dbState.txRowsQueue.push([current], [current])
     await caller.updateSide({ side: 'left', awayMode: false })
     dbState.txRowsQueue.push([current], [current])
     await caller.updateSide({ side: 'left', name: 'Renamed' })
+    // Re-sending true for a side that is already away is not a transition:
+    // syncing again would re-power a mirror the user may have turned off.
+    const alreadyAway = { ...current, awayMode: true }
+    dbState.txRowsQueue.push([alreadyAway], [alreadyAway])
+    await caller.updateSide({ side: 'left', awayMode: true })
     expect(schedulerMock.jm.syncMirroredSide).not.toHaveBeenCalled()
 
     schedulerMock.jm.syncMirroredSide.mockRejectedValueOnce(new Error('hw down'))

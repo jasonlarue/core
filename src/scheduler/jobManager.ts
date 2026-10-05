@@ -21,7 +21,7 @@ import { markSideMutated } from '@/src/hardware/deviceStateSync'
 import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGuard'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
-import { mirrorSideFor, singleSleeperSideFor } from '@/src/lib/singleSleeper'
+import { mirrorSideFor, scheduleSourceSide, singleSleeperSideFor } from '@/src/lib/singleSleeper'
 
 const HEARTBEAT_INTERVAL_MS_DEFAULT = 60_000
 const HEARTBEAT_STALE_MS_DEFAULT = 90_000
@@ -71,15 +71,27 @@ export class JobManager {
     return row?.isPowered ?? false
   }
 
+  private async awayModes(): Promise<Record<'left' | 'right', { awayMode: boolean | null }>> {
+    const rows = await db.select({ side: sideSettings.side, awayMode: sideSettings.awayMode }).from(sideSettings)
+    return Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])) as Record<'left' | 'right', { awayMode: boolean | null }>
+  }
+
   /**
    * Sides a schedule row on `side` drives: its own, plus the away side of a
    * single-sleeper bed, which mirrors the sleeper's power (its temperature
-   * follows through the controller's baseline).
+   * follows through the controller's baseline). An away side's own rows
+   * drive nothing — it follows the sleeper's rows, or none when both sides
+   * are away — otherwise its hidden power-off rows would fire against the
+   * mirror and leave it off until the sleeper's next power-on.
    */
   private async drivenSides(side: 'left' | 'right'): Promise<Array<'left' | 'right'>> {
     try {
-      const rows = await db.select({ side: sideSettings.side, awayMode: sideSettings.awayMode }).from(sideSettings)
-      const mirror = mirrorSideFor(side, Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])))
+      const away = await this.awayModes()
+      if (scheduleSourceSide(side, away) !== side) {
+        console.log(`[jobManager] ${side} is away; its own schedule rows are inactive`)
+        return []
+      }
+      const mirror = mirrorSideFor(side, away)
       return mirror ? [side, mirror] : [side]
     }
     catch (e) {
@@ -89,14 +101,44 @@ export class JobManager {
   }
 
   /**
-   * One side just went away with the other still home: the away side now
-   * mirrors the sleeper, so bring its power in line (on at the sleeper's
-   * current target, or off). No-op unless exactly one side is away.
+   * Run a power job on every side its row drives. A hardware failure on one
+   * side is logged and must not skip the other — the mirror would otherwise
+   * silently stay in its old state — then rethrown so the scheduler still
+   * records the job as failed.
    */
-  async syncMirroredSide(): Promise<void> {
-    const rows = await db.select({ side: sideSettings.side, awayMode: sideSettings.awayMode }).from(sideSettings)
-    const single = singleSleeperSideFor(Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])))
-    if (!single) return
+  private async forDrivenSides(
+    side: 'left' | 'right',
+    jobId: string,
+    run: (side: 'left' | 'right') => Promise<void>,
+  ): Promise<void> {
+    const failures: unknown[] = []
+    for (const driven of await this.drivenSides(side)) {
+      try {
+        await run(driven)
+      }
+      catch (e) {
+        console.error(`[jobManager] ${jobId} failed for ${driven}:`, e instanceof Error ? e.message : e)
+        failures.push(e)
+      }
+    }
+    if (failures.length > 0) throw failures[0]
+  }
+
+  /**
+   * `side` just went away. With the other side still home, `side` now mirrors
+   * that sleeper, so bring its power in line (on at the sleeper's current
+   * target, or off). With both sides now away, the other side was mirroring
+   * `side` until this moment and nothing else would ever power it off, so
+   * turn it off here.
+   */
+  async syncMirroredSide(side: 'left' | 'right'): Promise<void> {
+    const modes = await this.awayModes()
+    const single = singleSleeperSideFor(modes)
+    if (!single) {
+      const other = side === 'left' ? 'right' : 'left'
+      if (modes[side]?.awayMode && modes[other]?.awayMode) await this.powerOffForSchedule(other)
+      return
+    }
     const away = single === 'left' ? 'right' : 'left'
     if (!(await this.isSidePowered(single))) {
       await this.powerOffForSchedule(away)
@@ -372,9 +414,11 @@ export class JobManager {
    * the registered scheduler handler.
    */
   async runTemperatureJob(sched: typeof temperatureSchedules.$inferSelect): Promise<void> {
-    const status = await getTemperatureController().reconcile(sched.side)
-    if (status.source !== 'schedule' || status.blocked) {
-      console.log(`[jobManager] temperature schedule ${sched.id} deferred: ${status.blocked ?? status.source ?? 'no target'}`)
+    for (const side of await this.drivenSides(sched.side)) {
+      const status = await getTemperatureController().reconcile(side)
+      if (status.source !== 'schedule' || status.blocked) {
+        console.log(`[jobManager] temperature schedule ${sched.id} deferred: ${status.blocked ?? status.source ?? 'no target'}`)
+      }
     }
   }
 
@@ -395,7 +439,7 @@ export class JobManager {
   }
 
   async runPowerOnJob(sched: typeof powerSchedules.$inferSelect): Promise<void> {
-    for (const side of await this.drivenSides(sched.side)) await this.powerOnForSchedule(side, sched)
+    await this.forDrivenSides(sched.side, `power-on-${sched.id}`, side => this.powerOnForSchedule(side, sched))
   }
 
   private async powerOnForSchedule(side: 'left' | 'right', sched: typeof powerSchedules.$inferSelect): Promise<void> {
@@ -433,7 +477,7 @@ export class JobManager {
   }
 
   async runPowerOffJob(sched: typeof powerSchedules.$inferSelect): Promise<void> {
-    for (const side of await this.drivenSides(sched.side)) await this.powerOffForSchedule(side)
+    await this.forDrivenSides(sched.side, `power-off-${sched.id}`, side => this.powerOffForSchedule(side))
   }
 
   private async powerOffForSchedule(side: 'left' | 'right'): Promise<void> {
@@ -470,6 +514,10 @@ export class JobManager {
   }
 
   async runAlarmJob(sched: typeof alarmSchedules.$inferSelect): Promise<void> {
+    // An away side's alarms stay silent: nobody is there to wake, and the
+    // Schedule page no longer shows these rows. The mirror side's alarm
+    // temperature follows through the controller's baseline, not from here.
+    if ((await this.drivenSides(sched.side)).length === 0) return
     await withSideLock(sched.side, async () => {
       // Vibration must fire regardless of power state — the alarm's purpose is
       // to wake the user, who often sleeps with the bed off or on a power
@@ -681,10 +729,10 @@ export class JobManager {
                 .run()
             })
             // The other side still home: this side now mirrors that sleeper.
-            if (await this.drivenSides(side === 'left' ? 'right' : 'left').then(s => s.includes(side))) {
-              await this.syncMirroredSide().catch(e => console.warn(`[awayMode] Failed to mirror ${side}:`, e))
-              return
-            }
+            // Both away: the other side stops mirroring this one and goes off.
+            const mirrorsSleeper = (await this.drivenSides(side === 'left' ? 'right' : 'left')).includes(side)
+            await this.syncMirroredSide(side).catch(e => console.warn(`[awayMode] Failed to mirror ${side}:`, e))
+            if (mirrorsSleeper) return
             // Power off the side — under the side lock, marking it off in
             // the DB first so temp/alarm jobs queued behind this one observe
             // isPowered=false and skip (same protocol as runPowerOffJob).

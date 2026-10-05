@@ -477,7 +477,7 @@ export const settingsRouter = router({
       try {
         const { side, ...updates } = input
 
-        const updated = db.transaction((tx) => {
+        const { previous, updated } = db.transaction((tx) => {
           // Read current row to merge away window for validation
           const [current] = tx
             .select()
@@ -536,7 +536,7 @@ export const settingsRouter = router({
             })
           }
 
-          return result
+          return { previous: current, updated: result }
         })
 
         // Apply away-mode scheduling incrementally if it changed
@@ -550,11 +550,13 @@ export const settingsRouter = router({
           }
         }
 
-        // One side going away makes it mirror the sleeper on the other side.
-        if (input.awayMode === true) {
+        // A side going away (a real transition, not a re-sent true) mirrors
+        // the sleeper on the other side; with both now away, the other side
+        // stops mirroring this one.
+        if (input.awayMode === true && !previous.awayMode) {
           try {
             const jobManager = await getJobManager()
-            await jobManager.syncMirroredSide()
+            await jobManager.syncMirroredSide(side)
           }
           catch (e) {
             console.error('Single-sleeper mirror failed:', e)
