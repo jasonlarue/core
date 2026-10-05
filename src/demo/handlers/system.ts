@@ -1,4 +1,3 @@
-import { FIRMWARE_LABELS } from '@/src/lib/firmwareGeneration'
 import type { DemoHandlers, RouterOutputs } from '../types'
 import { DAY, HOUR, MINUTE, hashSeed, seededRandom } from '../util'
 
@@ -161,22 +160,14 @@ export const system: DemoHandlers<'system'> = {
     return { freedBytes: removed.reduce((s, i) => s + i.bytes, 0), removed: removed.length }
   },
 
-  getVersion: () => {
-    if (pendingUpdateAt !== null && Date.now() >= pendingUpdateAt) {
-      buildDate = new Date(pendingUpdateAt).toISOString()
-      pendingUpdateAt = null
-    }
-    return { branch: 'demo', commitHash: COMMIT, commitTitle: COMMIT_TITLE, buildDate, version: null }
-  },
-
   getSensorSource: () => {
-    // The demo socket streams piezo frames continuously; report a sub-second-old one.
-    const lastFrameAtMs = Date.now() - 250
+    const lastFrameAgeMs = 400 + (Date.now() % 1_200)
     return {
       firmware: {
-        generation: 'nats' as const,
-        ...FIRMWARE_LABELS.nats,
-        expectedTransport: 'nats' as const,
+        generation: 'nats',
+        label: 'NATS JetStream',
+        detail: 'New firmware. Sensor frames arrive over NATS JetStream.',
+        expectedTransport: 'nats',
         probed: true,
         signals: {
           natsUnitInstalled: true,
@@ -188,16 +179,24 @@ export const system: DemoHandlers<'system'> = {
         },
       },
       stream: {
-        source: 'nats' as const,
+        source: 'nats',
         override: null,
         legacyNatsDisabled: false,
-        lastFrameAtMs,
-        lastFrameAgeMs: Date.now() - lastFrameAtMs,
+        lastFrameAtMs: Date.now() - lastFrameAgeMs,
+        lastFrameAgeMs,
         lastFrameType: 'piezo-dual',
         firstFrameMs: 3124,
         uptimeSeconds: Math.floor((Date.now() - DEMO_UPTIME_START) / 1000),
       },
     }
+  },
+
+  getVersion: () => {
+    if (pendingUpdateAt !== null && Date.now() >= pendingUpdateAt) {
+      buildDate = new Date(pendingUpdateAt).toISOString()
+      pendingUpdateAt = null
+    }
+    return { branch: 'demo', commitHash: COMMIT, commitTitle: COMMIT_TITLE, buildDate, version: null }
   },
 }
 
