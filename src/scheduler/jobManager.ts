@@ -43,6 +43,7 @@ export class JobManager {
   private scheduler: Scheduler
   private reloadInProgress: Promise<void> | null = null
   private reloadPending: boolean = false
+  private readonly powerOnGeneration = { left: 0, right: 0 }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private readonly heartbeatIntervalMs: number
@@ -474,6 +475,8 @@ export class JobManager {
       return
     }
     await withSideLock(side, async () => {
+      // Ownership can change while the preceding side writes or this lock waits.
+      if (!(await this.drivenSides(sched.side)).includes(side)) return
       if (pumpStallShouldBlock(side)) {
         console.warn(`[jobManager] skipped power-on power-on-${sched.id}: pump stall guard blocks ${side}`)
         return
@@ -510,11 +513,12 @@ export class JobManager {
     if (after !== null) {
       if (!(await this.drivenSides(sched.side)).includes(sched.side)) return
       console.log(`[jobManager] power-off-${sched.id} held for the ${sched.side} alarm until ${new Date(after).toISOString()}`)
+      const generation = { ...this.powerOnGeneration }
       this.scheduler.scheduleOneTimeJob(
         `power-off-after-alarm-${sched.side}`,
         JobType.POWER_OFF,
         new Date(after),
-        () => this.powerOffAfterAlarm(sched),
+        () => this.powerOffAfterAlarm(sched, generation),
         { scheduleId: sched.id, side: sched.side },
       )
       return
@@ -547,18 +551,24 @@ export class JobManager {
    * it off behind their back once the alarm is over.
    */
   releaseHeldPowerOff(side: 'left' | 'right'): void {
+    // A hold owned by the other side can also drive this side. Invalidate only
+    // this side's pending shutdown so the sleeper's own hold can still finish.
+    this.powerOnGeneration[side]++
     if (this.scheduler.cancelJob(`power-off-after-alarm-${side}`)) {
       console.log(`[jobManager] released the power-off held for the ${side} alarm`)
     }
   }
 
   /** Re-evaluate schedule ownership when an alarm's deferred shutdown fires. */
-  private async powerOffAfterAlarm(sched: typeof powerSchedules.$inferSelect): Promise<void> {
-    await this.forDrivenSides(sched.side, `power-off-${sched.id}`, side => this.powerOffForSchedule(side))
-  }
-
-  private async powerOffForSchedule(side: 'left' | 'right'): Promise<void> {
-    await withSideLock(side, () => this.powerOffForScheduleLocked(side))
+  private async powerOffAfterAlarm(
+    sched: typeof powerSchedules.$inferSelect,
+    generation?: Readonly<Record<'left' | 'right', number>>,
+  ): Promise<void> {
+    await this.forDrivenSides(sched.side, `power-off-${sched.id}`, side => withSideLock(side, async () => {
+      if (!(await this.drivenSides(sched.side)).includes(side)) return
+      if (generation && generation[side] !== this.powerOnGeneration[side]) return
+      await this.powerOffForScheduleLocked(side)
+    }))
   }
 
   /** Respect a run-once override before a recurring or mirrored shutdown. */

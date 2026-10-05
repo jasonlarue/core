@@ -1576,6 +1576,9 @@ describe('JobManager residual mutation contracts', () => {
     })
     const awayRows = (left: boolean, right: boolean) => [{ side: 'left', awayMode: left }, { side: 'right', awayMode: right }]
     const selectReturns = (...results: unknown[][]) => {
+      // Ownership is persistent state and is read again at each write boundary.
+      const modes = results.shift() as ReturnType<typeof awayRows>
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue(Object.fromEntries(modes.map(r => [r.side, { awayMode: r.awayMode }])))
       const spy = vi.spyOn(db, 'select')
       for (const rows of results) spy.mockReturnValueOnce({ from: () => queryRows(rows) } as any)
       return spy
@@ -1593,6 +1596,31 @@ describe('JobManager residual mutation contracts', () => {
       selectReturns(awayRows(false, true))
       await manager.runPowerOffJob(power)
       expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
+    })
+
+    it('does not re-power the mirror after a both-away shutdown overtakes the scheduled write', async () => {
+      const modes = { left: { awayMode: false }, right: { awayMode: true } }
+      vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
+      let releaseOn!: () => void
+      let startedOn!: () => void
+      const started = new Promise<void>((resolve) => {
+        startedOn = resolve
+      })
+      const paused = new Promise<void>((resolve) => {
+        releaseOn = resolve
+      })
+      control.powerOnLocked.mockImplementationOnce(async () => {
+        startedOn()
+        await paused
+      })
+      const powerOn = manager.runPowerOnJob(power)
+      await started
+      modes.left.awayMode = true
+      const shutdown = manager.applyAwayMode('left')
+      releaseOn()
+      await Promise.all([powerOn, shutdown])
+      expect(control.powerOffLocked.mock.calls).toEqual([['right'], ['left']])
+      expect(control.powerOnLocked.mock.calls).toEqual([['left', 79]])
     })
 
     it.each([new Error('settings unavailable'), 'settings unavailable'])('falls back to the schedule side when ownership cannot be read (%s)', async (failure) => {
@@ -1855,6 +1883,23 @@ describe('JobManager residual mutation contracts', () => {
       await manager.runPowerOffJob(power)
       expect(control.powerOffLocked).not.toHaveBeenCalled()
       await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
+    })
+
+    it('preserves explicit mirror power-on without cancelling the sleeper deferred shutdown', async () => {
+      const captured = captureOneTimeJobs()
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      alarmIn(10)
+      await manager.runPowerOffJob(power)
+      // The device and HomeKit power-on paths release held shutdowns for the addressed side.
+      manager.releaseHeldPowerOff('right')
+      await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
+      expect(control.powerOffLocked.mock.calls).toEqual([['left']])
+
+      // This override only invalidates the old hold, not the next recurring power-off.
+      control.powerOffLocked.mockClear()
+      vi.spyOn(manager as any, 'alarmWarmupEnd').mockResolvedValue(null)
+      await manager.runPowerOffJob(power)
       expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
     })
 
