@@ -152,7 +152,9 @@ describe('TempScreen', () => {
     m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: 'left' }
     const screen = render(<TempScreen />)
     expect(card(screen, 'Jon (left)')).toBeTruthy()
-    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away').length).toBeGreaterThan(0)
+    // Phone side line and the desktop ownership row both say whose schedule the away side is on.
+    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away · linked to Jon').length).toBeGreaterThan(0)
+    expect(card(screen, 'Heidi (right)').getAllByText('Away · linked to Jon').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: 'Sides linked' })).toBeTruthy()
     // The sleeper's schedule and timeline.
     expect(m.timelineSides).toEqual(['left'])

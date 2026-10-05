@@ -164,7 +164,7 @@ function SideCards({ data, presenceAvailable }: { data: SideData, presenceAvaila
       </Card>
 
       <Card>
-        <CardHeader title="Away mode" subtitle="Pauses the schedule and keeps this side off until you return" />
+        <CardHeader title="Away mode" subtitle="While the other side is home, this side links to their schedule so one sleeper can use the whole bed. With both sides away the schedule is off." />
         <SettingRow label="Away">
           <Toggle
             on={awayMode}

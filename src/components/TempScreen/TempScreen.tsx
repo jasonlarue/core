@@ -233,6 +233,7 @@ export const TempScreen = () => {
               name={sideName(side)}
               presence={presenceFor(side)}
               away={Boolean(settings?.sides?.[side]?.awayMode)}
+              linkedTo={singleSleeperSide && singleSleeperSide !== side ? sideName(singleSleeperSide) : undefined}
               control={status?.temperatureControl?.[side]}
               variant={variant}
               display={tempDisplay}
