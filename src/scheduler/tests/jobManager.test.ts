@@ -1598,7 +1598,7 @@ describe('JobManager residual mutation contracts', () => {
     it.each([new Error('settings unavailable'), 'settings unavailable'])('falls back to the schedule side when ownership cannot be read (%s)', async (failure) => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       vi.spyOn(manager as any, 'awayModes').mockRejectedValue(failure)
-      await manager.runPowerOnJob({ ...power, onTemperature: null })
+      await manager.runPowerOnJob({ ...power, onTemperature: null as unknown as number })
       expect(control.powerOnLocked).toHaveBeenCalledExactlyOnceWith('left', 75)
       expect(warn).toHaveBeenCalledWith('[jobManager] could not read away mode for left:', 'settings unavailable')
     })
@@ -1660,6 +1660,7 @@ describe('JobManager residual mutation contracts', () => {
       await manager.runAlarmJob({
         ...row,
         id: 25,
+        wakeWindow: 0,
         side: 'right',
         dayOfWeek: 'monday',
         time: '06:30',
