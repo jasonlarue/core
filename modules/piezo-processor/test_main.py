@@ -1621,3 +1621,158 @@ class TestBedPresenceGate:
     def test_no_gate_configured(self):
         _, seen = self._run("unset")
         assert len(seen) == 1
+
+
+class TestDetectorCheckpointVitals:
+    """Real detector → checkpoint → reader → unmocked piezo/vitals pipeline."""
+
+    @staticmethod
+    def detector(monkeypatch):
+        health = type(sys)("common.health")
+        health.report_health = lambda *a, **kw: None
+        monkeypatch.setitem(sys.modules, "common.health", health)
+        spec = importlib.util.spec_from_file_location(
+            "common.calibration", Path(__file__).resolve().parent.parent / "common/calibration.py")
+        calibration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(calibration)
+        monkeypatch.setitem(sys.modules, "common.calibration", calibration)
+        monkeypatch.setattr(sys.modules["common.dialect"], "log_capsense_status_once", lambda *a: None, raising=False)
+        spec = importlib.util.spec_from_file_location(
+            "gate_sleep_detector", Path(__file__).resolve().parent.parent / "sleep-detector/main.py")
+        detector = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, detector)
+        spec.loader.exec_module(detector)
+        return detector
+
+    @staticmethod
+    def tracker(detector, side="left"):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE movement (side TEXT, timestamp INTEGER, total_movement INTEGER,
+                PRIMARY KEY(side, timestamp));
+            CREATE TABLE sleep_records (id INTEGER PRIMARY KEY, side TEXT,
+                entered_bed_at INTEGER, left_bed_at INTEGER, sleep_duration_seconds INTEGER,
+                times_exited_bed INTEGER, present_intervals TEXT, not_present_intervals TEXT,
+                created_at INTEGER);
+        """)
+        return detector.SessionTracker(side, detector.DBHolder(conn), None, detector.PumpGateCapSense())
+
+    @staticmethod
+    def frame(level=1000, side="left"):
+        return {"type": "capSense", side: {"out": level, "cen": level, "in": level}}
+
+    def feed(self, tracker, start, seconds, level):
+        for offset in range(0, seconds, 5):
+            tracker.process(start + offset, self.frame(level, tracker.side))
+        return start + seconds
+
+    @staticmethod
+    def vitals(path, now, expected):
+        import main
+        from common.bed_presence import BedPresence
+        bed = BedPresence(path, wall=lambda: now)
+        assert bed.occupied("left") is expected
+        seen = []
+        proc = main.SideProcessor("left", main.DBHolder(TestWriteVitalsResilience()._make_db()))
+        proc.sink = lambda cand: seen.append(cand) or True
+        proc.bed_occupied = lambda: bed.occupied("left")
+        with patch("main.time.time", return_value=now):
+            proc.ingest(make_bcg_signal(60, 70))
+        assert len(seen) == (0 if expected is False else 1)
+
+    @pytest.mark.parametrize("scenario", ["occupied_bootstrap", "missing_side", "lost_side"])
+    def test_unknown_capacitance_does_not_suppress_valid_vitals(self, monkeypatch, tmp_path, scenario):
+        detector = self.detector(monkeypatch)
+        tracker = self.tracker(detector)
+        now = time.time()
+        if scenario == "occupied_bootstrap":
+            self.feed(tracker, now - 7200, 7200, 1600)
+        elif scenario == "lost_side":
+            ts = self.feed(tracker, now - 2400, 600, 1600)
+            self.feed(tracker, ts, 1200, 1000)
+            assert tracker.baseline.absence_ready
+        if scenario != "occupied_bootstrap":
+            for offset in range(0, 600, 5):
+                tracker.process(now - 600 + offset, self.frame(side="right"))
+        path = tmp_path / "state.json"
+        assert detector.save_state(path, [tracker])
+        self.vitals(path, now, None)
+
+    def test_unloading_enables_empty_bed_veto_and_survives_restart_and_profile_reuse(self, monkeypatch, tmp_path):
+        detector = self.detector(monkeypatch)
+        tracker = self.tracker(detector)
+        now = time.time()
+        ts = self.feed(tracker, now - 2400, 600, 1600)
+        self.feed(tracker, ts, 1800, 1000)
+        assert tracker.baseline.absence_ready
+        path = tmp_path / "state.json"
+        assert detector.save_state(path, [tracker])
+        self.vitals(path, now, False)
+        restored = self.tracker(detector)
+        restored.restore(tracker.snapshot(), now)
+        # A restart requires fresh evidence even with a trusted baseline.
+        assert restored.snapshot()["vitals_presence"] is None
+        restored.process(now, self.frame())
+        assert detector.save_state(path, [restored])
+        self.vitals(path, now, False)
+        profile = detector.AdaptiveBaseline.from_profile(tracker.baseline.to_params(), "capSense", now)
+        assert profile.absence_ready
+        restored.baseline = profile
+        self.feed(restored, now + 5, 60, 1600)
+        assert detector.save_state(path, [restored])
+        self.vitals(path, now + 65, True)
+
+    def test_untrusted_seed_stays_untrusted_through_state_and_profile(self, monkeypatch):
+        detector = self.detector(monkeypatch)
+        tracker = self.tracker(detector)
+        self.feed(tracker, time.time() - 600, 600, 1600)
+        assert not detector.AdaptiveBaseline.from_state(tracker.baseline.snapshot()).absence_ready
+        params = tracker.baseline.to_params()
+        assert not detector.AdaptiveBaseline.from_profile(params, "capSense", 1).absence_ready
+        params.pop("absence_ready")
+        assert not detector.AdaptiveBaseline.from_profile(params, "capSense", 1).absence_ready
+        tracker.baseline.absence_ready = True
+        tracker.baseline.reseed({"out": 1600, "cen": 1600, "in": 1600}, "cap-reset")
+        assert not tracker.baseline.absence_ready
+
+    def test_merged_absence_requires_both_sides_and_away_presence_keeps_vitals(self, monkeypatch, tmp_path):
+        detector = self.detector(monkeypatch)
+        home, away = self.tracker(detector), self.tracker(detector, "right")
+        now = time.time()
+        for tracker in (home, away):
+            tracker.baseline = detector.AdaptiveBaseline("capSense", {"out": 1000, "cen": 1000, "in": 1000}, 300, absence_ready=True)
+        path = tmp_path / "state.json"
+        detector.process_single_sleeper(home, away, now, self.frame())
+        detector.save_state(path, [home, away])
+        self.vitals(path, now, None)
+        both = self.frame()
+        both["right"] = self.frame(1600, "right")["right"]
+        detector.process_single_sleeper(home, away, now + 5, both)
+        detector.save_state(path, [home, away])
+        self.vitals(path, now + 5, True)
+        both["right"] = self.frame()["left"]
+        for offset in range(10, 60, 5):
+            detector.process_single_sleeper(home, away, now + offset, both)
+        detector.save_state(path, [home, away])
+        self.vitals(path, now + 60, False)
+
+
+    @pytest.mark.parametrize("record", [
+        {"type": "capSense", "left": {"status": 0}},
+        {"type": "capSense", "left": {"out": 1000}},
+        {"type": "capSense", "left": {"out": float("nan"), "cen": 1000, "in": 1000}},
+        {"type": "capSense2", "left": {"values": [-1.0] * 8}},
+        {"type": "capSense2", "left": {"values": [1000.0] * 5}},
+    ])
+    def test_invalid_side_payload_cannot_refresh_empty_evidence(self, monkeypatch, tmp_path, record):
+        detector = self.detector(monkeypatch)
+        tracker = self.tracker(detector)
+        now = time.time()
+        tracker.baseline = detector.AdaptiveBaseline("capSense", {"out": 1000, "cen": 1000, "in": 1000}, 300, absence_ready=True)
+        tracker.process(now - 5, self.frame())
+        assert tracker.snapshot()["vitals_presence"] is False
+        tracker.process(now, record)
+        path = tmp_path / "state.json"
+        detector.save_state(path, [tracker])
+        self.vitals(path, now, None)

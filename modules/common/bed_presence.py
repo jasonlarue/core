@@ -15,6 +15,7 @@ stored under.
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -51,9 +52,16 @@ class BedPresence:
         file, unreadable, or stale) — callers fall back to their own signal."""
         self._maybe_reload()
         entry = self._state.get(side) if self._state is not None else None
-        if not isinstance(entry, dict) or "debounced_present" not in entry:
+        if not isinstance(entry, dict):
             return None
-        return bool(entry["debounced_present"])
+        occupied = entry.get("vitals_presence")
+        evidence_ts = entry.get("vitals_evidence_ts")
+        if type(occupied) is not bool or type(evidence_ts) not in (int, float):
+            return None
+        age = self._wall() - evidence_ts
+        if not math.isfinite(age) or age < 0 or age > self._stale_s:
+            return None
+        return occupied
 
     def _maybe_reload(self) -> None:
         now = self._clock()
