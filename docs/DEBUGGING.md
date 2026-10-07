@@ -103,6 +103,25 @@ pump shows as water + bed flatlining away from target while the side still
 reports powered. The guard logic lives in `src/hardware/pumpStallGuard.ts`
 (surfaced as the `stalled` verdict via `health.thermal`).
 
+## HomeKit “leak” notification immediately after startup
+
+The HomeKit `Pod pump left/right` accessories expose pump-stall notices through
+`LeakSensor`; the Home app's leak wording does not identify a water leak.
+Check `journalctl -u sleepypod.service` for `[pumpStallGuard]` and compare the
+firmware's pump duty / on-off commands in `journalctl -u frank`.
+
+On startup, saved `device_state.isPowered` and a retained non-neutral target
+with a zero countdown are insufficient to establish a running pump. The guard
+waits for per-side live evidence: a positive session countdown with a non-neutral
+target, positive pump duty or observed RPM >= 50 outside priming/spin-down
+with a fresh non-neutral firmware status, or a successfully completed
+non-neutral temperature command with a positive duration. Unknown-state frames
+do not accumulate stall dwell. Confirmation is captured when each frame arrives,
+so queued frames cannot inherit later evidence and wall-clock corrections cannot
+revoke confirmation. A once-per-side “waiting for live pump/session
+evidence” log explains this state; missing evidence is not reported as a stall.
+Unresolved incidents remain blocked, and pending hardware cutoffs still retry.
+
 ## Database or native-module errors on the pod
 
 The systemd unit hardcodes **`/usr/local/bin/node`** — an ad-hoc `node` on
