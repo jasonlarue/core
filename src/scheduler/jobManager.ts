@@ -1,8 +1,11 @@
+import { baseDayNumbers, scopeSides } from '@/src/hardware/base/types'
+import { getBaseController } from '@/src/hardware/base/instance'
 import { getTemperatureController } from '@/src/temperature/instance'
 import { Scheduler } from './scheduler'
 import { JobType } from './types'
 import { db } from '@/src/db'
 import {
+  baseSchedules,
   temperatureSchedules,
   powerSchedules,
   alarmSchedules,
@@ -309,6 +312,12 @@ export class JobManager {
       await yieldIfNeeded()
     }
 
+    const elevations = await db.select().from(baseSchedules)
+    for (const elevation of elevations) {
+      this.upsertBaseSchedule(elevation)
+      await yieldIfNeeded()
+    }
+
     // Load system schedules (priming, reboot)
     const [settings] = await db.select().from(deviceSettings).limit(1)
     if (settings) {
@@ -415,6 +424,36 @@ export class JobManager {
       console.error('[scheduler] heartbeat-triggered reload failed:', e instanceof Error ? e.message : e)
     }
     return stale
+  }
+
+  upsertBaseSchedule(sched: typeof baseSchedules.$inferSelect): void {
+    this.removeBaseSchedule(sched.id)
+    if (!sched.enabled || this.shutdownRequested) return
+    // Connect in advance; a missed movement is never replayed on reconnection.
+    getBaseController()
+    const [hour, minute] = this.parseTime(sched.time)
+    this.scheduler.scheduleJob(`base-${sched.id}`, JobType.BASE,
+      `${minute} ${hour} * * ${baseDayNumbers(sched.dayOfWeek).join(',')}`,
+      () => this.runBaseJob(sched.id), { scheduleId: sched.id })
+  }
+
+  removeBaseSchedule(id: number): void {
+    this.scheduler.cancelJob(`base-${id}`)
+  }
+
+  async runBaseJob(id: number): Promise<void> {
+    if (this.shutdownRequested) return
+    const [row] = await db.select().from(baseSchedules).where(eq(baseSchedules.id, id))
+    if (!row?.enabled) return
+    const deadline = Date.now() + 60_000
+    await getBaseController().setPosition({ ...row, sides: scopeSides(row.side) }, async () => {
+      if (this.shutdownRequested || Date.now() > deadline) return false
+      const [current] = await db.select().from(baseSchedules).where(eq(baseSchedules.id, id))
+      if (!current?.enabled || current.head !== row.head || current.feet !== row.feet || current.feedRate !== row.feedRate
+        || current.dayOfWeek !== row.dayOfWeek || current.time !== row.time || current.side !== row.side) return false
+      const sides = await db.select().from(sideSettings)
+      return scopeSides(row.side).every(side => sides.some(s => s.side === side && !s.awayMode))
+    })
   }
 
   /**

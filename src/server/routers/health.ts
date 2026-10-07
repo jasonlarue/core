@@ -51,6 +51,13 @@ export const healthRouter = router({
     .output(z.object({
       uptimeSeconds: z.number(),
       rssBytes: z.number(),
+      /** process.memoryUsage() counters; arrayBuffers is included in external. These do not partition RSS. */
+      memory: z.object({
+        heapTotalBytes: z.number(),
+        heapUsedBytes: z.number(),
+        externalBytes: z.number(),
+        arrayBuffersBytes: z.number(),
+      }),
       startup: z.array(z.object({ name: z.string(), elapsedMs: z.number(), durationMs: z.number() })),
       sensorSource: z.enum(['pending', 'raw', 'nats']),
       firstFrameMs: z.number().nullable(),

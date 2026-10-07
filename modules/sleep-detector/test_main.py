@@ -1208,3 +1208,33 @@ class TestCapSenseMovement:
         for i in range(5):
             t.process(self.T0 + i / 2, {"type": "capSense", "left": {"out": 1000 + i, "cen": 2000, "in": 2400}})
         assert [lv[0] for lv in t._cap_levels] == [1000, 1001, 1002, 1003, 1004]
+
+
+class TestAbsenceReadiness:
+    def test_one_spike_does_not_validate_an_occupied_bootstrap(self):
+        t = _live_tracker()
+        ts = _run(t, 1_777_000_000, 60, 600)
+        t.process(ts, _cap(1800))
+        _run(t, ts + 5, 600, 600)
+        assert not t.baseline.absence_ready
+
+    def test_empty_bootstrap_learns_after_sleeper_enters_and_leaves(self):
+        t = _live_tracker()
+        ts = _run(t, 1_777_000_000, 60, 0)
+        ts = _run(t, ts, 600, 600)
+        _run(t, ts, 600, 0)
+        assert t.baseline.absence_ready
+        assert t.snapshot()["vitals_presence"] is False
+
+    def test_gaps_and_invalid_samples_do_not_count_as_unloading_time(self):
+        b = main.AdaptiveBaseline("capSense", EMPTY, 300)
+        b._absence_reference = sum(EMPTY.values()) + 1800
+        b.observe_absence_reference(100, EMPTY)
+        b.observe_absence_reference(200, EMPTY)
+        assert not b.absence_ready
+        b.observe_absence_reference(205, None)
+        b.observe_absence_reference(235, EMPTY)
+        assert not b.absence_ready
+        for ts in range(240, 271, 5):
+            b.observe_absence_reference(ts, EMPTY)
+        assert b.absence_ready

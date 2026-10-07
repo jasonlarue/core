@@ -1,3 +1,4 @@
+vi.mock('@/src/hardware/base/instance', () => ({ getBaseController: vi.fn() }))
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { WakeWindows } from '../wakeWindow'
@@ -62,6 +63,7 @@ vi.mock('@/src/db/schema', () => {
   // The stub DB doesn't actually query them, so the shape doesn't matter beyond the name.
   const make = (name: string) => ({ _: { name } })
   return {
+    baseSchedules: make('baseSchedules'),
     temperatureSchedules: make('temperatureSchedules'),
     powerSchedules: make('powerSchedules'),
     alarmSchedules: make('alarmSchedules'),
@@ -1145,6 +1147,43 @@ describe('JobManager incremental upsert/cancel', () => {
       expect(windows().isOpen(1)).toBe(false)
     })
 
+    it('does not open a window without an upcoming alarm invocation', () => {
+      vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockReturnValue(null)
+      const open = vi.spyOn(windows(), 'open')
+      manager.upsertAlarmJob({ ...baseAlarm, wakeWindow: 20 })
+      expect(open).not.toHaveBeenCalled()
+      expect(windows().isOpen(baseAlarm.id)).toBe(false)
+    })
+
+    it('the window-opening job watches the alarm and wires its early-fire callback', async () => {
+      const schedule = vi.spyOn(manager.getScheduler(), 'scheduleJob')
+      const next = vi.spyOn(manager.getScheduler(), 'getNextInvocation')
+        .mockReturnValue(new Date(Date.now() + 30 * 60_000))
+      const open = vi.spyOn(windows(), 'open').mockImplementation(() => {})
+      const run = vi.spyOn(manager, 'runAlarmJob').mockResolvedValue()
+      const alarm = { ...baseAlarm, wakeWindow: 20 }
+      manager.upsertAlarmJob(alarm)
+      expect(open).not.toHaveBeenCalled()
+      const due = new Date(Date.now() + 20 * 60_000)
+      next.mockReturnValue(due)
+      const callback = schedule.mock.calls.find(([id]) => id === 'alarm-window-1')?.[3]
+      if (!callback) throw new Error('Missing window-opening job')
+      await callback()
+      expect(open).toHaveBeenCalledExactlyOnceWith(1, 'left', due, 20, expect.any(Function))
+      await open.mock.calls[0][4]()
+      expect(run).toHaveBeenCalledExactlyOnceWith(alarm)
+    })
+
+    it('the registered alarm job runs the set-time early-fire check', async () => {
+      const schedule = vi.spyOn(manager.getScheduler(), 'scheduleJob')
+      const run = vi.spyOn(manager, 'runScheduledAlarm').mockResolvedValue()
+      manager.upsertAlarmJob(baseAlarm)
+      const callback = schedule.mock.calls.find(([id]) => id === 'alarm-1')?.[3]
+      if (!callback) throw new Error('Missing alarm job')
+      await callback()
+      expect(run).toHaveBeenCalledExactlyOnceWith(baseAlarm)
+    })
+
     it('the set-time job skips an alarm that already fired early, and fires otherwise', async () => {
       const run = vi.spyOn(manager, 'runAlarmJob').mockResolvedValue()
       vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -1434,7 +1473,7 @@ describe('JobManager.loadSchedules event-loop yielding', () => {
   it('awaits setImmediate every 25 entries so the event loop can service I/O', async () => {
     // Keep elapsed time below the budget to isolate the row-count backstop.
     vi.spyOn(performance, 'now').mockReturnValue(0)
-    // Ninety rows across the three loops require three count-based yields.
+    // 120 rows across four loops require four count-based yields.
     const rows = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, enabled: false }))
     vi.spyOn(db, 'select').mockImplementation((() => ({
       from: () => {
@@ -1450,7 +1489,7 @@ describe('JobManager.loadSchedules event-loop yielding', () => {
     const setImmediateSpy = vi.spyOn(global, 'setImmediate') as unknown as ReturnType<typeof vi.fn>
     await manager.loadSchedules()
     // The system schedules call also runs but uses .limit, not the looped path.
-    expect(setImmediateSpy).toHaveBeenCalledTimes(3)
+    expect(setImmediateSpy).toHaveBeenCalledTimes(4)
   })
 
   it.each([
@@ -1928,6 +1967,23 @@ describe('JobManager residual mutation contracts', () => {
       await manager.runPowerOffJob(power)
       expect(schedule).not.toHaveBeenCalled()
       expect(control.powerOffLocked).toHaveBeenCalledWith('left')
+    })
+
+    it('holds power until the last overlapping alarm finishes, regardless of row order', async () => {
+      const captured = captureOneTimeJobs()
+      vi.spyOn(db, 'select').mockReturnValueOnce({ from: () => queryRows([
+        { ...alarmRow, id: 5, duration: 120 },
+        { ...alarmRow, id: 6, duration: 180 },
+        { ...alarmRow, id: 7, duration: 60 },
+      ]) } as any)
+      vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockImplementation(id =>
+        new Date(Date.now() + (id === 'alarm-6' ? 20 : 10) * 60_000))
+      await manager.runPowerOffJob(power)
+      const schedule = vi.mocked(manager.getScheduler().scheduleOneTimeJob)
+      expect(schedule.mock.calls[0][2].getTime()).toBe(Date.now() + 20 * 60_000 + 180_000 + ALARM_HOLD_AFTER_MIN * 60_000)
+      expect(control.powerOffLocked).not.toHaveBeenCalled()
+      await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
+      expect(control.powerOffLocked).toHaveBeenCalledExactlyOnceWith('left')
     })
 
     it('uses the wake window as the warm-up when longer', async () => {
