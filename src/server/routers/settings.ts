@@ -17,6 +17,8 @@ const timestampSchema = z.coerce.date()
 
 const deviceSettingsSchema = z.object({
   id: z.number(),
+  bedMode: z.enum(['two', 'solo-left', 'solo-right']).default('two'),
+  unusedZoneMode: z.enum(['follow', 'off', 'independent']).default('off'),
   timezone: z.string(),
   temperatureUnit: temperatureUnitSchema,
   rebootDaily: z.boolean(),
@@ -215,6 +217,8 @@ export const settingsRouter = router({
     .input(
       z
         .object({
+          bedMode: z.enum(['two', 'solo-left', 'solo-right']).optional(),
+          unusedZoneMode: z.enum(['follow', 'off', 'independent']).optional(),
           timezone: timezoneSchema.optional(),
           temperatureUnit: temperatureUnitSchema.optional(),
           rebootDaily: z.boolean().optional(),
@@ -240,6 +244,8 @@ export const settingsRouter = router({
     )
     .output(z.object({
       id: z.number(),
+      bedMode: z.enum(['two', 'solo-left', 'solo-right']).default('two'),
+      unusedZoneMode: z.enum(['follow', 'off', 'independent']).default('off'),
       timezone: z.string(),
       temperatureUnit: temperatureUnitSchema,
       rebootDaily: z.boolean(),
@@ -282,6 +288,7 @@ export const settingsRouter = router({
         // pre-transaction read) so the disable-edge decision below cannot
         // race a concurrent settings mutation.
         let priorPumpStallProtectionEnabled = false
+        let bedConfigurationChanged = false
 
         const updated = db.transaction((tx) => {
           // Fetch current settings to validate final computed state
@@ -300,6 +307,8 @@ export const settingsRouter = router({
           }
 
           priorPumpStallProtectionEnabled = Boolean(current.pumpStallProtectionEnabled)
+          bedConfigurationChanged = (input.bedMode !== undefined && input.bedMode !== current.bedMode)
+            || (input.unusedZoneMode !== undefined && input.unusedZoneMode !== current.unusedZoneMode)
 
           // Compute final state after update
           const finalRebootDaily = input.rebootDaily ?? current.rebootDaily
@@ -429,6 +438,10 @@ export const settingsRouter = router({
           }
         }
 
+        if (bedConfigurationChanged) {
+          await (await getJobManager()).applyBedConfiguration()
+        }
+
         return updated
       }
       catch (error) {
@@ -553,7 +566,7 @@ export const settingsRouter = router({
         // A side going away (a real transition, not a re-sent true) mirrors
         // the sleeper on the other side; with both now away, the other side
         // stops mirroring this one.
-        if (input.awayMode === true && !previous.awayMode) {
+        if (input.awayMode !== undefined && input.awayMode !== previous.awayMode) {
           try {
             const jobManager = await getJobManager()
             await jobManager.applyAwayMode(side)

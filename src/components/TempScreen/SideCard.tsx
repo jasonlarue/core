@@ -23,6 +23,7 @@ export interface SideCardProps {
   away: boolean
   /** Single sleeper: the home side's name this away side is linked to. */
   linkedTo?: string
+  scheduleStatus?: string
   control: TemperatureControlStatus | undefined
   variant: ControlVariant
   display: TempDisplay
@@ -52,12 +53,12 @@ export interface SideCardProps {
 }
 
 function awayLine(linkedTo?: string) {
-  return linkedTo ? `Away · linked to ${linkedTo}` : 'Away'
+  return linkedTo ? `Following ${linkedTo}’s schedule` : 'Away'
 }
 
 function sideLine(side: Side, presence: Presence, away: boolean, linkedTo?: string) {
   const parts = [side === 'left' ? 'Left' : 'Right']
-  if (away) parts.push(awayLine(linkedTo))
+  if (away || linkedTo) parts.push(awayLine(linkedTo))
   else if (presence) parts.push(presence === 'in' ? 'In bed' : 'Out of bed')
   return parts.join(' · ')
 }
@@ -74,6 +75,7 @@ export function SideCard({
   presence,
   away,
   linkedTo,
+  scheduleStatus,
   control,
   variant,
   display,
@@ -94,7 +96,7 @@ export function SideCard({
   stepper,
 }: SideCardProps) {
   const isStepper = variant === 'stepper' && stepper != null
-  const line = sideLine(side, presence, away, linkedTo)
+  const line = [sideLine(side, presence, away, linkedTo), scheduleStatus].filter(Boolean).join(' · ')
 
   return (
     <Card
@@ -128,7 +130,7 @@ export function SideCard({
           <>
             <span className="shrink-0 min-[900px]:hidden">{line}</span>
             {/* Desktop hides the side line (the dot carries presence), so an away side says so here. */}
-            {away && <span className="hidden shrink-0 min-[900px]:inline">{awayLine(linkedTo)}</span>}
+            {(away || linkedTo || scheduleStatus) && <span className="hidden min-[900px]:inline">{[away || linkedTo ? awayLine(linkedTo) : null, scheduleStatus].filter(Boolean).join(' · ')}</span>}
           </>
         )}
         onResumed={onResumed}

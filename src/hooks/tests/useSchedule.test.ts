@@ -11,8 +11,8 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const sideMock = vi.hoisted(() => {
-  const state: { primarySide: 'left' | 'right', activeSides: Array<'left' | 'right'>, singleSleeperSide: 'left' | 'right' | null }
-    = { primarySide: 'left', activeSides: ['left'], singleSleeperSide: null }
+  const state: { primarySide: 'left' | 'right', activeSides: Array<'left' | 'right'>, singleScheduleSide: 'left' | 'right' | null }
+    = { primarySide: 'left', activeSides: ['left'], singleScheduleSide: null }
   return { state }
 })
 
@@ -100,7 +100,7 @@ afterEach(() => {
   scheduleGroupingMock.sortChronological.mockClear()
   sideMock.state.primarySide = 'left'
   sideMock.state.activeSides = ['left']
-  sideMock.state.singleSleeperSide = null
+  sideMock.state.singleScheduleSide = null
 })
 
 describe('useSchedule — derived state', () => {
@@ -549,7 +549,7 @@ describe('useSchedule — saveCurve / deleteCurve edge cases', () => {
 
   it('saveCurve writes only the sleeper\'s side when the other is away, even with both selected', async () => {
     sideMock.state.activeSides = ['left', 'right']
-    sideMock.state.singleSleeperSide = 'right'
+    sideMock.state.singleScheduleSide = 'right'
     trpcMock.overrides.allRight = {
       temperature: [{ id: 2, dayOfWeek: 'monday', time: '07:00', temperature: 70, enabled: true }],
       power: [],

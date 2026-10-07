@@ -55,7 +55,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   markFirmwareSynced() // the firmware has reported in, as it has on a running pod
   resetControlDatabase(sqlite)
-  db.insert(deviceSettings).values({ id: 1, timezone: 'UTC' }).run()
+  db.insert(deviceSettings).values({ id: 1, timezone: 'UTC', unusedZoneMode: 'follow' }).run()
   db.insert(sideSettings).values([{ side: 'left', name: 'Left' }, { side: 'right', name: 'Right' }]).run()
   db.insert(deviceState).values([
     { side: 'left', isPowered: true, targetTemperature: 75 },
@@ -362,4 +362,14 @@ describe('production controller with migrated SQLite', () => {
     expect(hardware.setTemperature).not.toHaveBeenCalled()
     expect(db.select().from(temperatureHolds).all()).toHaveLength(0)
   })
+})
+
+it.each(['off', 'follow', 'independent'] as const)('solo setup uses the %s unused-zone baseline without changing saved schedules', async (unusedZoneMode) => {
+  db.update(deviceSettings).set({ bedMode: 'solo-left', unusedZoneMode }).run()
+  db.insert(temperatureSchedules).values({ side: 'right', dayOfWeek: 'monday', time: '21:00', temperature: 81 }).run()
+  const controller = getTemperatureController()
+  expect(controller.status('right').targetTemperature).toBe(unusedZoneMode === 'off' ? null : unusedZoneMode === 'follow' ? 72 : 81)
+  db.update(deviceSettings).set({ bedMode: 'two' }).run()
+  expect(controller.status('right').targetTemperature).toBe(81)
+  expect(db.select().from(temperatureSchedules).all()).toHaveLength(3)
 })

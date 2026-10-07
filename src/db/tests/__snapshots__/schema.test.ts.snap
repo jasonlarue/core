@@ -458,6 +458,8 @@ exports[`complete Drizzle schema contracts > pins every main-database table, col
     "checks": 0,
     "columns": [
       "id | sql:integer | logical:number/SQLiteInteger | not-null | default:fn:1 | primary-key | not-unique | not-autoincrement | enum:none",
+      "bed_mode | sql:text | logical:string/SQLiteText | not-null | default:two | not-primary-key | not-unique | not-autoincrement | enum:two,solo-left,solo-right",
+      "unused_zone_mode | sql:text | logical:string/SQLiteText | not-null | default:off | not-primary-key | not-unique | not-autoincrement | enum:follow,off,independent",
       "timezone | sql:text | logical:string/SQLiteText | not-null | default:America/Los_Angeles | not-primary-key | not-unique | not-autoincrement | enum:none",
       "temperature_unit | sql:text | logical:string/SQLiteText | not-null | default:F | not-primary-key | not-unique | not-autoincrement | enum:F,C",
       "reboot_daily | sql:integer | logical:boolean/SQLiteBoolean | not-null | default:false | not-primary-key | not-unique | not-autoincrement | enum:none",

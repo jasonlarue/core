@@ -4,7 +4,7 @@ import type * as ScheduleTime from '@/src/lib/scheduleTime'
 import { SchedulePage } from '../SchedulePage'
 
 const m = vi.hoisted(() => ({
-  side: { primarySide: 'left', selectedSide: 'left', selectSide: vi.fn(), singleSleeperSide: null as string | null },
+  side: { primarySide: 'left', selectedSide: 'left', selectSide: vi.fn(), singleScheduleSide: null as string | null },
   schedule: {
     confirmMessage: null as string | null,
     isPowerEnabled: true,
@@ -66,7 +66,7 @@ const DATA = {
 
 beforeEach(() => {
   m.side.selectedSide = 'left'
-  m.side.singleSleeperSide = null
+  m.side.singleScheduleSide = null
   m.side.selectSide.mockReset()
   m.schedule.isPowerEnabled = true
   m.schedule.confirmMessage = null
@@ -140,7 +140,7 @@ describe('SchedulePage', () => {
   it('hides the side switch when one side is away', () => {
     // The Temp screen may have the selection on 'both' (linked).
     m.side.selectedSide = 'both'
-    m.side.singleSleeperSide = 'right'
+    m.side.singleScheduleSide = 'right'
     const s = render(<SchedulePage />)
     expect(s.queryAllByRole('tablist', { name: 'Side' })).toHaveLength(0)
     expect(s.getByTestId('alarms').textContent).toBe('right/right')

@@ -189,6 +189,8 @@ const expectedTables: Record<string, TableSpec> = {
     name: 'device_settings',
     columns: [
       { name: 'id', notNull: true, default: 'fn' },
+      { name: 'bed_mode', notNull: true, default: 'two' },
+      { name: 'unused_zone_mode', notNull: true, default: 'off' },
       { name: 'timezone', notNull: true, default: 'America/Los_Angeles' },
       { name: 'temperature_unit', notNull: true, default: 'F' },
       { name: 'reboot_daily', notNull: true, default: false },

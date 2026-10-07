@@ -20,6 +20,7 @@ const schedulerMock = vi.hoisted(() => {
     upsertPrimeJob: vi.fn(),
     upsertLedNightMode: vi.fn(async () => undefined),
     upsertAwayMode: vi.fn(),
+    applyBedConfiguration: vi.fn(async () => undefined),
     applyAwayMode: vi.fn(async () => undefined),
   }
   return { getJobManager: vi.fn(async () => jm), jm }
@@ -1215,4 +1216,24 @@ describe('settings.deleteGesture — error surface', () => {
     await expect(caller.deleteGesture({ side: 'left', tapType: 'doubleTap' }))
       .rejects.toThrow('Failed to delete gesture: Unknown error')
   })
+})
+
+it('persists solo setup and zone policy and applies the transition once', async () => {
+  schedulerMock.jm.applyBedConfiguration.mockClear()
+  const current = { ...baseDevice, bedMode: 'two', unusedZoneMode: 'off' }
+  const updated = { ...current, bedMode: 'solo-left', unusedZoneMode: 'independent' }
+  dbState.txRowsQueue.push([current], [updated])
+  const result = await caller.updateDevice({ bedMode: 'solo-left', unusedZoneMode: 'independent' })
+  expect(result).toMatchObject({ bedMode: 'solo-left', unusedZoneMode: 'independent' })
+  expect(dbState.txSetCalls[0]).toMatchObject({ bedMode: 'solo-left', unusedZoneMode: 'independent' })
+  expect(schedulerMock.jm.applyBedConfiguration).toHaveBeenCalledTimes(1)
+  dbState.txRowsQueue.push([updated], [updated])
+  await caller.updateDevice({ bedMode: 'solo-left', unusedZoneMode: 'independent' })
+  expect(schedulerMock.jm.applyBedConfiguration).toHaveBeenCalledTimes(1)
+})
+
+it('rejects invalid sleeper setup and zone policy', async () => {
+  await expect(caller.updateDevice({ bedMode: 'solo' as 'two' })).rejects.toThrow()
+  await expect(caller.updateDevice({ unusedZoneMode: 'linked' as 'off' })).rejects.toThrow()
+  expect(dbMock.transaction).not.toHaveBeenCalled()
 })

@@ -36,11 +36,10 @@ interface EditingCurve {
  * in the context column. Creating/editing a curve swaps in `CurveEditor`.
  */
 export function SchedulePage() {
-  // One side away: the page is that sleeper's schedule (the away side follows
-  // it on the pod) and the switch is hidden.
-  const { primarySide, selectedSide: chosenSide, selectSide, singleSleeperSide } = useSide()
-  const side = singleSleeperSide ?? primarySide
-  const selectedSide = singleSleeperSide ?? chosenSide
+  // Focus one source only when the unused zone has no independent schedule.
+  const { primarySide, selectedSide: chosenSide, selectSide, singleScheduleSide } = useSide()
+  const side = singleScheduleSide ?? primarySide
+  const selectedSide = singleScheduleSide ?? chosenSide
   const {
     confirmMessage,
     isPowerEnabled,
@@ -184,7 +183,7 @@ export function SchedulePage() {
     <>
       <PageHeader
         title="Schedule"
-        middle={singleSleeperSide
+        middle={singleScheduleSide
           ? undefined
           : (
               <div className="hidden min-[900px]:block">
@@ -205,7 +204,7 @@ export function SchedulePage() {
         )}
       />
 
-      {!singleSleeperSide && (
+      {!singleScheduleSide && (
         <SegmentedControl
           full
           ariaLabel="Side"

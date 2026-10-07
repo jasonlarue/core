@@ -1617,7 +1617,7 @@ describe('JobManager residual mutation contracts', () => {
     const selectReturns = (...results: unknown[][]) => {
       // Ownership is persistent state and is read again at each write boundary.
       const modes = results.shift() as ReturnType<typeof awayRows>
-      vi.spyOn(manager as any, 'awayModes').mockResolvedValue(Object.fromEntries(modes.map(r => [r.side, { awayMode: r.awayMode }])))
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ ...Object.fromEntries(modes.map(r => [r.side, { awayMode: r.awayMode }])), unusedZoneMode: 'follow' })
       const spy = vi.spyOn(db, 'select')
       for (const rows of results) spy.mockReturnValueOnce({ from: () => queryRows(rows) } as any)
       return spy
@@ -1626,6 +1626,30 @@ describe('JobManager residual mutation contracts', () => {
 
     beforeEach(() => {
       vi.spyOn(manager, 'hasActiveRunOnceSession').mockResolvedValue(false)
+    })
+
+    it.each(['off', 'independent', 'follow'] as const)('applies %s zone policy without waking an absent partner', async (unusedZoneMode) => {
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ bedMode: 'solo-left', unusedZoneMode })
+      await manager.runPowerOnJob(power)
+      expect(control.powerOnLocked.mock.calls.map(call => call[0])).toEqual(unusedZoneMode === 'follow' ? ['left', 'right'] : ['left'])
+      control.powerOnLocked.mockClear()
+      await manager.runPowerOnJob({ ...power, side: 'right' })
+      expect(control.powerOnLocked.mock.calls.map(call => call[0])).toEqual(unusedZoneMode === 'independent' ? ['right'] : [])
+      await manager.runAlarmJob({ ...row, side: 'right' } as any)
+      expect(hardwareClient.setAlarm).not.toHaveBeenCalled()
+    })
+
+    it('turns off the unused zone when changing from follow to off and restores its own schedule when independent', async () => {
+      const modes = { bedMode: 'solo-left', unusedZoneMode: 'off' }
+      vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
+      await manager.applyBedConfiguration()
+      expect(control.powerOffLocked).toHaveBeenCalledExactlyOnceWith('right')
+      control.powerOffLocked.mockClear()
+      control.reconcileLocked.mockClear()
+      modes.unusedZoneMode = 'independent'
+      await manager.applyBedConfiguration()
+      expect(control.powerOffLocked).not.toHaveBeenCalled()
+      expect(control.reconcileLocked.mock.calls).toEqual([['left'], ['right']])
     })
 
     it('powers the away side on and off with the sleeper\'s schedule', async () => {
@@ -1638,7 +1662,7 @@ describe('JobManager residual mutation contracts', () => {
     })
 
     it('does not re-power the mirror after a both-away shutdown overtakes the scheduled write', async () => {
-      const modes = { left: { awayMode: false }, right: { awayMode: true } }
+      const modes = { unusedZoneMode: 'follow', left: { awayMode: false }, right: { awayMode: true } }
       vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
       let releaseOn!: () => void
       let startedOn!: () => void
@@ -1658,7 +1682,7 @@ describe('JobManager residual mutation contracts', () => {
       const shutdown = manager.applyAwayMode('left')
       releaseOn()
       await Promise.all([powerOn, shutdown])
-      expect(control.powerOffLocked.mock.calls).toEqual([['right'], ['left']])
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
       expect(control.powerOnLocked.mock.calls).toEqual([['left', 79]])
     })
 
@@ -1784,7 +1808,7 @@ describe('JobManager residual mutation contracts', () => {
 
     it.each([['left', 'right'], ['right', 'left']] as const)('cannot revive %s after %s shuts down while sync waits', async (away, sleeper) => {
       vi.spyOn(manager as any, 'awayModes').mockResolvedValue({
-        [away]: { awayMode: true }, [sleeper]: { awayMode: false },
+        unusedZoneMode: 'follow', [away]: { awayMode: true }, [sleeper]: { awayMode: false },
       })
       let powered = true
       vi.spyOn(manager as any, 'isSidePowered').mockImplementation(async () => powered)
@@ -1806,7 +1830,7 @@ describe('JobManager residual mutation contracts', () => {
     })
 
     it('holds the sleeper lock until the mirror write finishes', async () => {
-      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: false }, right: { awayMode: true } })
       vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
       let release!: () => void
       control.powerOnLocked.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -1825,22 +1849,20 @@ describe('JobManager residual mutation contracts', () => {
     it.each(['left', 'right'] as const)('completes both-away shutdown when %s goes away in Settings', async (side) => {
       selectReturns(awayRows(true, true))
       await manager.applyAwayMode(side)
-      expect(control.powerOffLocked.mock.calls).toEqual([[side === 'left' ? 'right' : 'left'], [side]])
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
       expect(control.powerOnLocked).not.toHaveBeenCalled()
     })
 
     it('attempts the newly-away shutdown even if the former mirror fails', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const failure = new Error('mirror offline')
       control.powerOffLocked.mockRejectedValueOnce(failure)
       selectReturns(awayRows(true, true))
-      await manager.applyAwayMode('right')
+      await expect(manager.applyAwayMode('right')).rejects.toBe(failure)
       expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
-      expect(warn).toHaveBeenCalledWith('[awayMode] Failed to mirror right:', failure)
     })
 
     it('rechecks away ownership after waiting for both locks', async () => {
-      let modes = { left: { awayMode: true }, right: { awayMode: false } }
+      let modes = { unusedZoneMode: 'follow', left: { awayMode: true }, right: { awayMode: false } }
       vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
       vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
       let release!: () => void
@@ -1850,11 +1872,11 @@ describe('JobManager residual mutation contracts', () => {
       await Promise.resolve()
       const sync = manager.applyAwayMode('left')
       for (let i = 0; i < 10; i++) await Promise.resolve()
-      modes = { left: { awayMode: true }, right: { awayMode: true } }
+      modes = { unusedZoneMode: 'follow', left: { awayMode: true }, right: { awayMode: true } }
       release()
       await Promise.all([held, sync])
       expect(control.powerOnLocked).not.toHaveBeenCalled()
-      expect(control.powerOffLocked.mock.calls).toEqual([['right'], ['left']])
+      expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
     })
 
     it.each([{ targetRows: [] }, { targetRows: [{ target: null }] }])('uses the default mirror temperature without a saved target ($targetRows)', async ({ targetRows }) => {
@@ -1888,6 +1910,7 @@ describe('JobManager residual mutation contracts', () => {
     const alarmRow = { id: 5, side: 'left', enabled: true, duration: 120, wakeWindow: 0 }
 
     beforeEach(() => {
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({})
       vi.useFakeTimers()
       vi.setSystemTime(new Date('2026-10-01T11:30:00.000Z'))
       vi.spyOn(manager, 'hasActiveRunOnceSession').mockResolvedValue(false)
@@ -1899,6 +1922,26 @@ describe('JobManager residual mutation contracts', () => {
       vi.spyOn(manager.getScheduler(), 'getNextInvocation').mockImplementation(id =>
         id === 'alarm-5' ? new Date(Date.now() + minutes * 60_000) : null)
     }
+
+    it('does not defer an independent unused zone for an absent sleeper alarm', async () => {
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ bedMode: 'solo-right', unusedZoneMode: 'independent' })
+      const captured = captureOneTimeJobs()
+      alarmIn(10)
+      await manager.runPowerOffJob(power)
+      expect(control.powerOffLocked).toHaveBeenCalledExactlyOnceWith('left')
+      expect(captured.has('power-off-after-alarm-left')).toBe(false)
+    })
+
+    it('keeps the active sleeper deferred shutdown when partner-away configuration changes', async () => {
+      const captured = captureOneTimeJobs()
+      alarmIn(10)
+      await manager.runPowerOffJob(power)
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true }, unusedZoneMode: 'off' })
+      await manager.applyBedConfiguration()
+      control.powerOffLocked.mockClear()
+      await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
+      expect(control.powerOffLocked).toHaveBeenCalledExactlyOnceWith('left')
+    })
 
     it('holds the power-off until the alarm has finished, then powers off', async () => {
       const captured = captureOneTimeJobs()
@@ -1917,7 +1960,7 @@ describe('JobManager residual mutation contracts', () => {
 
     it('holds both mirrored sides for the sleeper alarm and shuts both down afterward', async () => {
       const captured = captureOneTimeJobs()
-      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: false }, right: { awayMode: true } })
       alarmIn(10)
       await manager.runPowerOffJob(power)
       expect(control.powerOffLocked).not.toHaveBeenCalled()
@@ -1927,7 +1970,7 @@ describe('JobManager residual mutation contracts', () => {
 
     it('preserves explicit mirror power-on without cancelling the sleeper deferred shutdown', async () => {
       const captured = captureOneTimeJobs()
-      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: false }, right: { awayMode: true } })
       alarmIn(10)
       await manager.runPowerOffJob(power)
       // The device and HomeKit power-on paths release held shutdowns for the addressed side.
@@ -1944,7 +1987,7 @@ describe('JobManager residual mutation contracts', () => {
 
     it('does not hold an away side own power-off for its hidden alarm', async () => {
       const schedule = vi.spyOn(manager.getScheduler(), 'scheduleOneTimeJob')
-      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: true }, right: { awayMode: false } })
+      vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: true }, right: { awayMode: false } })
       alarmIn(10)
       await manager.runPowerOffJob(power)
       expect(schedule).not.toHaveBeenCalled()
@@ -1953,10 +1996,10 @@ describe('JobManager residual mutation contracts', () => {
 
     it('rechecks ownership when a held power-off fires after both sides go away', async () => {
       const captured = captureOneTimeJobs()
-      const modes = vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: false }, right: { awayMode: true } })
+      const modes = vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: false }, right: { awayMode: true } })
       alarmIn(10)
       await manager.runPowerOffJob(power)
-      modes.mockResolvedValue({ left: { awayMode: true }, right: { awayMode: true } })
+      modes.mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: true }, right: { awayMode: true } })
       await required(captured.get('power-off-after-alarm-left'), 'held power-off').handler()
       expect(control.powerOffLocked).not.toHaveBeenCalled()
     })
@@ -2239,6 +2282,7 @@ describe('JobManager residual mutation contracts', () => {
   })
 
   it('away-start powers off under the side lock, marking the side off in the DB first', async () => {
+    vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: true }, right: { awayMode: false }, unusedZoneMode: 'off' })
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
     const captured = captureOneTimeJobs()
@@ -2292,7 +2336,7 @@ describe('JobManager residual mutation contracts', () => {
       update: () => ({ set: () => ({ where: () => ({ run: vi.fn() }) }) }),
     })) as any)
     vi.spyOn(console, 'log').mockImplementation(() => {})
-    vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ left: { awayMode: true }, right: { awayMode: false } })
+    vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ unusedZoneMode: 'follow', left: { awayMode: true }, right: { awayMode: false } })
     vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(true)
     ;(manager as any).scheduleAwayMode('left', new Date(Date.now() + 60_000).toISOString(), null)
     await required(captured.get('away-start-left'), 'away-start-left').handler()
@@ -2314,7 +2358,7 @@ describe('JobManager residual mutation contracts', () => {
     vi.spyOn(db, 'select').mockImplementation((() => ({ from: () => queryRows(bothAway) })) as any)
     ;(manager as any).scheduleAwayMode('left', new Date(Date.now() + 60_000).toISOString(), null)
     await required(captured.get('away-start-left'), 'away-start-left').handler()
-    expect(control.powerOffLocked.mock.calls).toEqual([['right'], ['left']])
+    expect(control.powerOffLocked.mock.calls).toEqual([['left'], ['right']])
   })
 
   it('blocks a power-on job whose trip lands while it is queued on the side lock', async () => {
@@ -2393,6 +2437,8 @@ describe('JobManager residual mutation contracts', () => {
   })
 
   it('pins away-mode state writes, payloads, metadata, logs, and failure warnings', async () => {
+    const modes = { left: { awayMode: true }, right: { awayMode: false }, unusedZoneMode: 'off' }
+    vi.spyOn(manager as any, 'awayModes').mockImplementation(async () => modes)
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
     const captured = captureOneTimeJobs()
@@ -2420,6 +2466,7 @@ describe('JobManager residual mutation contracts', () => {
     expect(hardwareClient.setPower).toHaveBeenCalledWith('left', false)
     expect(broadcastMutationStatus).toHaveBeenCalledWith('left', { targetLevel: 0 })
 
+    modes.left.awayMode = false
     await required(captured.get('away-return-left'), 'away-return-left').handler()
     expect(updates[1]).toMatchObject({ awayMode: false })
     expect(log).toHaveBeenCalledWith('Away mode: deactivating for left')
@@ -2427,11 +2474,12 @@ describe('JobManager residual mutation contracts', () => {
 
     const startFailure = new Error('off failed')
     hardwareClient.setPower.mockRejectedValueOnce(startFailure)
-    await required(captured.get('away-start-left'), 'away-start-left').handler()
-    expect(warn).toHaveBeenCalledWith('[awayMode] Failed to power off left:', startFailure)
+    modes.left.awayMode = true
+    await expect(required(captured.get('away-start-left'), 'away-start-left').handler()).rejects.toBe(startFailure)
 
     const returnFailure = new Error('on failed')
     hardwareClient.setTemperature.mockRejectedValueOnce(returnFailure)
+    modes.left.awayMode = false
     await required(captured.get('away-return-left'), 'away-return-left').handler()
     expect(warn).toHaveBeenCalledWith('[awayMode] Failed to power on left:', returnFailure)
   })

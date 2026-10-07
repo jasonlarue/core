@@ -1473,15 +1473,15 @@ describe('JobManager handler closures', () => {
     expect(setTemperature).toHaveBeenCalledWith('right', 75)
   })
 
-  it('away-mode start handler tolerates hardware failures', async () => {
+  it('away-mode start handler reports hardware failures', async () => {
     const future = new Date(Date.now() + 60 * 60_000).toISOString()
     insertSideSettings({ side: 'left', awayStart: future })
     await manager.loadSchedules()
 
     setPower.mockRejectedValueOnce(new Error('hw down'))
     const handler = captured.get('away-start-left')!
-    // Must not reject: handler swallows hw errors with console.warn
-    await expect(handler()).resolves.toBeUndefined()
+    // Surface partial application so the scheduler records the failure.
+    await expect(handler()).rejects.toThrow('hw down')
   })
 
   it('away-mode return handler tolerates hardware failures', async () => {

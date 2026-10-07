@@ -7,6 +7,8 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-or
 
 export const deviceSettings = sqliteTable('device_settings', {
   id: integer('id').primaryKey().$defaultFn(() => 1), // Singleton
+  bedMode: text('bed_mode', { enum: ['two', 'solo-left', 'solo-right'] }).notNull().default('two'),
+  unusedZoneMode: text('unused_zone_mode', { enum: ['follow', 'off', 'independent'] }).notNull().default('off'),
   timezone: text('timezone').notNull().default('America/Los_Angeles'),
   temperatureUnit: text('temperature_unit', { enum: ['F', 'C'] })
     .notNull()

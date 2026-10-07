@@ -144,17 +144,18 @@ describe('TempScreen', () => {
   it('shows in-bed only when sensed, and away instead of presence', () => {
     const screen = render(<TempScreen />)
     expect(card(screen, 'Jon (left)').getAllByText('Left · In bed').length).toBeGreaterThan(0)
-    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away').length).toBeGreaterThan(0)
+    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away · Schedule off').length).toBeGreaterThan(0)
     expect(screen.queryByText(/Out of bed/)).toBeNull()
   })
 
   it('keeps both cards, linked, when one side is away', () => {
     m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: 'left' }
+    m.settings = { ...(m.settings as object), device: { unusedZoneMode: 'follow' } }
     const screen = render(<TempScreen />)
     expect(card(screen, 'Jon (left)')).toBeTruthy()
     // Phone side line and the desktop ownership row both say whose schedule the away side is on.
-    expect(card(screen, 'Heidi (right)').getAllByText('Right · Away · linked to Jon').length).toBeGreaterThan(0)
-    expect(card(screen, 'Heidi (right)').getAllByText('Away · linked to Jon').length).toBeGreaterThan(0)
+    expect(card(screen, 'Heidi (right)').getAllByText('Right · Following Jon’s schedule').length).toBeGreaterThan(0)
+    expect(card(screen, 'Heidi (right)').getAllByText('Following Jon’s schedule').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: 'Sides linked' })).toBeTruthy()
     // The sleeper's schedule and timeline.
     expect(m.timelineSides).toEqual(['left'])
@@ -319,6 +320,7 @@ describe('TempScreen', () => {
 
     it('edits Night on the sleeper\'s schedule only when the other side is away, from either card', () => {
       m.side = { isLinked: true, primarySide: 'left', singleSleeperSide: 'left' }
+      m.settings = { ...(m.settings as object), device: { unusedZoneMode: 'follow' } }
       const screen = render(<TempScreen />)
       const right = card(screen, 'Heidi (right)')
       fireEvent.click(right.getByRole('tab', { name: /Night/ }))
@@ -357,4 +359,13 @@ describe('TempScreen', () => {
       expect(m.setPower).toHaveBeenCalledExactlyOnceWith({ side: 'right', powered: true }, expect.anything())
     })
   })
+})
+
+it('exposes solo setup without linking temperature controls', () => {
+  m.settings = { device: { bedMode: 'solo-left', unusedZoneMode: 'independent' }, sides: { left: { awayMode: false }, right: { awayMode: false } } }
+  m.side = { isLinked: false, primarySide: 'left', singleSleeperSide: 'left' }
+  const screen = render(<TempScreen />)
+  expect(screen.getByRole('link', { name: 'Manage sleepers: Solo sleeper · Jon' }).getAttribute('href')).toBe('/settings?section=sides')
+  expect(screen.getByRole('button', { name: 'Link sides' })).toBeTruthy()
+  expect(card(screen, 'Heidi (right)').getAllByText(/Independent schedule/).length).toBeGreaterThan(0)
 })

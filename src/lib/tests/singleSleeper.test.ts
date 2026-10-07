@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mirrorSideFor, scheduleSourceSide, singleSleeperSideFor } from '../singleSleeper'
+import { activeSleeperSides, singleScheduleSideFor, mirrorSideFor, scheduleSourceSide, singleSleeperSideFor } from '../singleSleeper'
 
 describe('singleSleeperSideFor', () => {
   it.each([
@@ -15,7 +15,7 @@ describe('singleSleeperSideFor', () => {
   })
 })
 
-const sides = (left: boolean, right: boolean) => ({ left: { awayMode: left }, right: { awayMode: right } })
+const sides = (left: boolean, right: boolean) => ({ left: { awayMode: left }, right: { awayMode: right }, unusedZoneMode: 'follow' as const })
 
 describe('scheduleSourceSide', () => {
   it.each([
@@ -42,5 +42,28 @@ describe('mirrorSideFor', () => {
     ['left', sides(true, true), null],
   ] as const)('%s with %j → %s', (side, s, expected) => {
     expect(mirrorSideFor(side, s)).toBe(expected)
+  })
+})
+
+describe('explicit solo setup and independent zones', () => {
+  it.each(['solo-left', 'solo-right'] as const)('retains %s setup while the sleeper is away and returns', (bedMode) => {
+    const side = bedMode === 'solo-left' ? 'left' : 'right'
+    const state = { bedMode, left: { awayMode: false }, right: { awayMode: false } }
+    expect(activeSleeperSides(state)).toEqual([side])
+    state[side].awayMode = true
+    expect(activeSleeperSides(state)).toEqual([])
+    expect(scheduleSourceSide('left', state)).toBeNull()
+    expect(scheduleSourceSide('right', state)).toBeNull()
+    state[side].awayMode = false
+    expect(singleSleeperSideFor(state)).toBe(side)
+  })
+
+  it.each(['two', 'solo-left'] as const)('separates occupancy from all three zone policies in %s setup', (bedMode) => {
+    const state = { bedMode, left: { awayMode: false }, right: { awayMode: true } }
+    expect(scheduleSourceSide('right', state)).toBeNull()
+    expect(scheduleSourceSide('right', { ...state, unusedZoneMode: 'follow' })).toBe('left')
+    expect(scheduleSourceSide('right', { ...state, unusedZoneMode: 'independent' })).toBe('right')
+    expect(singleScheduleSideFor({ ...state, unusedZoneMode: 'independent' })).toBeNull()
+    expect(singleSleeperSideFor({ ...state, unusedZoneMode: 'independent' })).toBe('left')
   })
 })

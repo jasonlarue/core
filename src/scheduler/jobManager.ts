@@ -25,7 +25,7 @@ import { markAlarmStarted } from '@/src/hardware/alarmState'
 import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGuard'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { timeToDate, nowInTimezone } from './timeUtils'
-import { mirrorSideFor, scheduleSourceSide, singleSleeperSideFor } from '@/src/lib/singleSleeper'
+import { activeSleeperSides, type BedState, mirrorSideFor, scheduleSourceSide, singleSleeperSideFor } from '@/src/lib/singleSleeper'
 import { WakeWindows, slotBefore } from './wakeWindow'
 import { ALARM_HOLD_AFTER_MIN, alarmWarmupMinutes } from '@/src/temperature/baseline'
 
@@ -81,19 +81,13 @@ export class JobManager {
   }
 
   /** Read the current schedule ownership for both sides. */
-  private async awayModes(): Promise<Record<'left' | 'right', { awayMode: boolean | null }>> {
+  private async awayModes(): Promise<BedState> {
     const rows = await db.select({ side: sideSettings.side, awayMode: sideSettings.awayMode }).from(sideSettings)
-    return Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])) as Record<'left' | 'right', { awayMode: boolean | null }>
+    const [config] = await db.select({ bedMode: deviceSettings.bedMode, unusedZoneMode: deviceSettings.unusedZoneMode }).from(deviceSettings).limit(1)
+    return { ...Object.fromEntries(rows.map(r => [r.side, { awayMode: r.awayMode }])), ...config }
   }
 
-  /**
-   * Sides a schedule row on `side` drives: its own, plus the away side of a
-   * single-sleeper bed, which mirrors the sleeper's power (its temperature
-   * follows through the controller's baseline). An away side's own rows
-   * drive nothing — it follows the sleeper's rows, or none when both sides
-   * are away — otherwise its hidden power-off rows would fire against the
-   * mirror and leave it off until the sleeper's next power-on.
-   */
+  /** Zones driven by this source's rows under the current unused-zone policy. */
   private async drivenSides(side: 'left' | 'right'): Promise<Array<'left' | 'right'>> {
     try {
       const away = await this.awayModes()
@@ -147,17 +141,27 @@ export class JobManager {
     }))
   }
 
-  /** Apply the complete away-start transition for Settings and scheduled jobs. */
-  async applyAwayMode(side: 'left' | 'right'): Promise<void> {
+  /** Re-read configuration under both locks so setup and away transitions agree. */
+  async applyBedConfiguration(): Promise<void> {
     await withSideLock('left', () => withSideLock('right', async () => {
       const modes = await this.awayModes()
-      // Attempt both shutdowns even if the former mirror's hardware fails.
-      await this.syncMirroredSideLocked(side, modes)
-        .catch(e => console.warn(`[awayMode] Failed to mirror ${side}:`, e))
-      if (singleSleeperSideFor(modes)) return
-      await this.powerOffLocked(side)
-        .catch(e => console.warn(`[awayMode] Failed to power off ${side}:`, e))
+      const failures: unknown[] = []
+      for (const side of ['left', 'right'] as const) {
+        try {
+          const source = scheduleSourceSide(side, modes)
+          if (!source) await this.powerOffForScheduleLocked(side)
+          else if (source !== side) await this.syncMirroredSideLocked(side, modes)
+          else await getTemperatureController().reconcileLocked(side)
+        }
+        catch (error) { failures.push(error) }
+      }
+      if (failures.length) throw failures[0]
     }))
+  }
+
+  async applyAwayMode(side: 'left' | 'right'): Promise<void> {
+    console.log(`[jobManager] applying bed configuration after ${side} away status changed`)
+    await this.applyBedConfiguration()
   }
 
   /** Synchronize from current ownership and power while holding left, then right. */
@@ -166,6 +170,7 @@ export class JobManager {
     modes: Awaited<ReturnType<JobManager['awayModes']>>,
   ): Promise<void> {
     const single = singleSleeperSideFor(modes)
+    if (single && !mirrorSideFor(single, modes)) return
     if (!single) {
       const other = side === 'left' ? 'right' : 'left'
       if (modes[side]?.awayMode && modes[other]?.awayMode) await this.powerOffForScheduleLocked(other)
@@ -572,6 +577,7 @@ export class JobManager {
    * snooze re-fires into a bed that is still on), else null.
    */
   private async alarmWarmupEnd(side: 'left' | 'right'): Promise<number | null> {
+    if (!activeSleeperSides(await this.awayModes()).includes(side)) return null
     const alarms = await db.select().from(alarmSchedules)
       .where(and(eq(alarmSchedules.side, side), eq(alarmSchedules.enabled, true)))
     const now = Date.now()
@@ -685,8 +691,9 @@ export class JobManager {
     // An away side's alarms stay silent: nobody is there to wake, and the
     // Schedule page no longer shows these rows. The mirror side's alarm
     // temperature follows through the controller's baseline, not from here.
-    if ((await this.drivenSides(sched.side)).length === 0) return
+    if (!activeSleeperSides(await this.awayModes()).includes(sched.side)) return
     await withSideLock(sched.side, async () => {
+      if (!activeSleeperSides(await this.awayModes()).includes(sched.side)) return
       // Vibration must fire regardless of power state — the alarm's purpose is
       // to wake the user, who often sleeps with the bed off or on a power
       // schedule that hasn't kicked in yet at wake time. Temperature, however,
@@ -919,10 +926,15 @@ export class JobManager {
                 .where(eq(sideSettings.side, side))
                 .run()
             })
+            if (!activeSleeperSides(await this.awayModes()).includes(side)) {
+              await this.applyBedConfiguration()
+              return
+            }
             // Restore power for the side — inside the side lock, with the
             // guard checked there, so a stall trip while this job is queued
             // still blocks the power-on (ADR 0022).
             await withSideLock(side, async () => {
+              if (!activeSleeperSides(await this.awayModes()).includes(side)) return
               if (pumpStallShouldBlock(side)) {
                 console.warn(`[jobManager] skipped away-return power-on: pump stall guard blocks ${side}`)
                 return
@@ -939,6 +951,7 @@ export class JobManager {
                 console.warn(`[awayMode] Failed to power on ${side}:`, e)
               }
             })
+            await this.applyBedConfiguration()
           },
           { side },
         )
