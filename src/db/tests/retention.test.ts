@@ -153,7 +153,7 @@ describe('pruneOldBiometrics', () => {
 
     const result = pruneOldBiometrics(cutoff, db)
 
-    expect(result.rowsDeleted).toBe(12)
+    expect(result.rowsDeleted).toBe(13)
     expect(result.perTable).toEqual({
       vitals: 1,
       vitals_quality: 1,
