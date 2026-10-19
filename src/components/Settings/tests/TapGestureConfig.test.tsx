@@ -120,9 +120,24 @@ describe('TapGestureConfig', () => {
     })
   })
 
-  it('saves nothing normally and stop while ringing, omitting the snooze duration', () => {
+  it('a new tap opened from the ringing column gets no normal action', () => {
     render(<TapGestureConfig filterSide="left" />)
     fireEvent.click(screen.getByLabelText('Quad tap while ringing: Not set'))
+    fireEvent.click(screen.getByText('Snooze'))
+    fireEvent.click(screen.getByText('Save'))
+    expect(trpcMock.setMutate).toHaveBeenCalledWith({
+      side: 'left',
+      tapType: 'quadTap',
+      actionType: 'alarm',
+      alarmBehavior: 'snooze',
+      alarmSnoozeDuration: 300,
+      alarmInactiveBehavior: 'none',
+    })
+  })
+
+  it('saves nothing normally and stop while ringing, omitting the snooze duration', () => {
+    render(<TapGestureConfig filterSide="left" />)
+    fireEvent.click(screen.getByLabelText('Quad tap: Not set'))
     fireEvent.click(screen.getByText('Nothing'))
     fireEvent.click(screen.getByText('Stop alarm'))
     fireEvent.click(screen.getByText('Save'))

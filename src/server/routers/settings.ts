@@ -743,6 +743,16 @@ export const settingsRouter = router({
       ])
     )
     .mutation(async ({ input }) => {
+      // Write the whole row: a field the call leaves out is cleared, so a tap
+      // switched between action types keeps nothing from its old action.
+      const row = {
+        temperatureChange: null,
+        temperatureAmount: null,
+        alarmBehavior: null,
+        alarmSnoozeDuration: null,
+        alarmInactiveBehavior: null,
+        ...input,
+      }
       try {
         const result = db.transaction((tx) => {
           // Check if gesture already exists
@@ -763,7 +773,7 @@ export const settingsRouter = router({
             const [updated] = tx
               .update(tapGestures)
               .set({
-                ...input,
+                ...row,
                 updatedAt: new Date(),
               })
               .where(eq(tapGestures.id, existing[0].id))
@@ -783,9 +793,7 @@ export const settingsRouter = router({
             // Create new
             const [created] = tx
               .insert(tapGestures)
-              .values({
-                ...input,
-              })
+              .values(row)
               .returning()
               .all()
 

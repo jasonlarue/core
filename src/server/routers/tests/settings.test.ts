@@ -1233,9 +1233,37 @@ describe('settings.setGesture — write payload and error surface', () => {
       side: 'left',
       tapType: 'doubleTap',
       actionType: 'alarm',
+      temperatureChange: null,
+      temperatureAmount: null,
       alarmBehavior: 'snooze',
+      alarmSnoozeDuration: null,
+      alarmInactiveBehavior: null,
       updatedAt: expect.any(Date),
     }])
+  })
+
+  it('switching a tap from alarm to temperature keeps none of the old alarm settings', async () => {
+    // Ringing actions apply to temperature taps too, so a leftover would act.
+    dbState.txRowsQueue.push([{ id: 5, side: 'left', tapType: 'doubleTap' }], [{ id: 5 }])
+    await caller.setGesture({
+      side: 'left', tapType: 'doubleTap', actionType: 'temperature',
+      temperatureChange: 'decrement', temperatureAmount: 2,
+    })
+    expect(dbState.txSetCalls).toEqual([expect.objectContaining({
+      actionType: 'temperature', temperatureChange: 'decrement', temperatureAmount: 2,
+      alarmBehavior: null, alarmSnoozeDuration: null, alarmInactiveBehavior: null,
+    })])
+  })
+
+  it('a temperature tap saved with a ringing action keeps it', async () => {
+    dbState.txRowsQueue.push([{ id: 5, side: 'left', tapType: 'doubleTap' }], [{ id: 5 }])
+    await caller.setGesture({
+      side: 'left', tapType: 'doubleTap', actionType: 'temperature',
+      temperatureChange: 'decrement', temperatureAmount: 2, alarmBehavior: 'snooze', alarmSnoozeDuration: 420,
+    })
+    expect(dbState.txSetCalls).toEqual([expect.objectContaining({
+      alarmBehavior: 'snooze', alarmSnoozeDuration: 420, alarmInactiveBehavior: null,
+    })])
   })
 
   it('rethrows the inner TRPCError unwrapped when the update returns no row', async () => {

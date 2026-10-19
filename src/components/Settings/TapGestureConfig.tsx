@@ -66,10 +66,12 @@ interface EditState {
   alarmSnoozeDuration: number
 }
 
-const defaultEditState = (side: Side, tapType: TapType): EditState => ({
+// A new tap opened from the ringing column starts with no normal action, so
+// saving only a ringing action doesn't also make it step the temperature.
+const defaultEditState = (side: Side, tapType: TapType, fromRinging = false): EditState => ({
   side,
   tapType,
-  idle: 'temperature',
+  idle: fromRinging ? 'none' : 'temperature',
   temperatureChange: 'increment',
   temperatureAmount: 2,
   ringing: 'dismiss',
@@ -136,9 +138,9 @@ export function TapGestureConfig({ filterSide = 'left', onSideChange }: {
     [gestures]
   )
 
-  const openEditor = (tapType: TapType) => {
+  const openEditor = (tapType: TapType, fromRinging: boolean) => {
     const gesture = findGesture(filterSide, tapType)
-    setEditing(gesture ? editStateFromGesture(gesture) : defaultEditState(filterSide, tapType))
+    setEditing(gesture ? editStateFromGesture(gesture) : defaultEditState(filterSide, tapType, fromRinging))
   }
 
   const handleSave = useCallback(() => {
@@ -199,7 +201,7 @@ export function TapGestureConfig({ filterSide = 'left', onSideChange }: {
       >
         <ValueChip
           aria-label={`${label}${ringing ? ' while ringing' : ''}: ${describe(findGesture(filterSide, key))}`}
-          onClick={() => openEditor(key)}
+          onClick={() => openEditor(key, ringing)}
           className={findGesture(filterSide, key) ? undefined : 'text-fg-2'}
         >
           {describe(findGesture(filterSide, key))}
