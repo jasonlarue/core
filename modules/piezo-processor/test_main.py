@@ -2068,6 +2068,92 @@ class TestBeatFrontRouting:
                       "right": [Chunk(60, [0, 1000, 2000, 3000], 0.9)]})
         assert _hb_rows(conn) == [("left", 60, [0, 1000, 2000, 3000], 0.9)]
 
+    def _occupied(self, front, left_open, right_open):
+        """Both sides present, each tracker still open at the given minute."""
+        front._was_present = {"left": True, "right": True}
+        front.trackers["left"]._chunk_start = left_open
+        front.trackers["right"]._chunk_start = right_open
+
+    def test_single_sleeper_waits_for_the_other_side_to_finish_the_minute(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        # Left finishes minute 60 first; right is still inside it.
+        self._occupied(front, 120, 60)
+        front._write({"left": [Chunk(60, [0, None, 3000], 0.6)], "right": []})
+        assert _hb_rows(conn) == []
+        # Right finishes it on a later record with the better chunk.
+        self._occupied(front, 120, 120)
+        front._write({"left": [], "right": [Chunk(60, [0, 1000, 2000, 3000], 0.9)]})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000, 2000, 3000], 0.9)]
+
+    def test_a_minute_only_one_side_saw_is_stored_once_the_other_moves_on(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        self._occupied(front, 120, None)
+        front.trackers["right"]._last_committed_end = 100.0
+        front._write({"left": [Chunk(60, [0, 1000], 0.8)], "right": []})
+        assert _hb_rows(conn) == []
+        front.trackers["right"]._last_committed_end = 130.0
+        front._write({"left": [], "right": []})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000], 0.8)]
+
+    def test_a_held_minute_is_not_kept_past_the_hold_limit(self):
+        import main
+        from beats import Chunk
+        front, conn = self._front("left")
+        self._occupied(front, 120, 60)  # right never moves on
+        front._write({"left": [Chunk(60, [0, 1000], 0.8)], "right": []})
+        front._latest_ts = 120.0 + main.HEARTBEAT_HOLD_MAX_S + 1
+        front._write({"left": [], "right": []})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000], 0.8)]
+
+    def test_switching_sensor_starts_the_minute_with_a_break(self):
+        """The two trackers' beat anchors differ, so no interval may span
+        a minute from one sensor and the next from the other."""
+        from beats import Chunk
+        front, conn = self._front("left")
+        front._write({"left": [Chunk(60, [0, 1000, 2000], 0.9)], "right": [Chunk(60, [80], 0.5)]})
+        front._write({"left": [Chunk(120, [0], 0.5)], "right": [Chunk(120, [80, 1080, 2080], 0.9)]})
+        front._write({"left": [], "right": [Chunk(180, [None, 40, 1040], 0.9)]})
+        assert [r[2] for r in _hb_rows(conn)] == [[0, 1000, 2000], [None, 80, 1080, 2080], [None, 40, 1040]]
+
+    def test_leaving_the_bed_stores_the_minute_in_progress(self):
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        here = {"left": True}
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: here.get(s, False))
+        flushes = []
+        tr = front.trackers["left"]
+        tr.push = lambda *a, **k: None
+        tr.take_chunks = lambda flush_before=None: flushes.append(flush_before) or []
+        x = np.zeros(5)
+        front.push(0.0, x, None, x, None)
+        here["left"] = False
+        front.push(1.0, x, None, x, None)
+        assert flushes == [None, float("inf")]
+
+    def test_a_failed_write_is_retried(self):
+        import main
+        from beats import Chunk
+        conn = TestWriteVitalsResilience()._make_db()
+        holder = main.DBHolder(conn)
+        front = main.BeatFront(holder, _Mode(None))
+        front._write({"left": [Chunk(60, [0, 1000], 0.8)], "right": []})
+        assert holder.write_failures == 1
+        conn.execute("CREATE TABLE heartbeats (id INTEGER PRIMARY KEY AUTOINCREMENT, side TEXT, "
+                     "timestamp INTEGER, beats TEXT, quality REAL, UNIQUE(side, timestamp))")
+        front._write({"left": [], "right": []})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000], 0.8)]
+        assert holder.write_failures == 0
+
+    def test_beats_are_stored_compactly(self):
+        import main
+        from beats import Chunk
+        conn, holder = _hb_db()
+        main.write_heartbeats(holder, "left", Chunk(60, [0, None, 1000], 0.8))
+        assert conn.execute("SELECT beats FROM heartbeats").fetchone()[0] == "[0,null,1000]"
+
     def test_both_trackers_get_the_other_side_as_reference(self):
         import numpy as np
         front, _ = self._front(None)
@@ -2132,6 +2218,17 @@ class TestBeatFrontRouting:
         front.set_rate_hint("right", 0.9)
         assert (front.trackers["right"]._hint, front.trackers["right"]._hint_at) == (0.9, 1234.0)
         assert front.trackers["left"]._hint is None
+
+    def test_rate_hint_is_timed_by_the_record_not_the_wall_clock(self, monkeypatch):
+        """Replayed records are hours old; the hint must age with them."""
+        import main
+        import numpy as np
+        conn, holder = _hb_db()
+        front = main.BeatFront(holder, _Mode(None), present=lambda s: False)
+        monkeypatch.setattr(main.time, "time", lambda: 9_999_999.0)
+        front.push(5000.0, np.zeros(5), None, np.zeros(5), None)
+        front.set_rate_hint("left", 0.9)
+        assert front.trackers["left"]._hint_at == 5000.0
 
     def test_empty_bed_vibration_writes_no_beats(self):
         """A steady mechanical rhythm looks like a pulse to the detector;

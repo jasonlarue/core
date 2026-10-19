@@ -29,7 +29,7 @@ import {
  *   vitals, movement, bed_temp, freezer_temp, flow_readings,
  *   ambient_light, water_level_readings, pump_alerts, vitals_quality,
  *   thermal_state, health_runs, flash_write_samples,
- *   heartbeats (~70 KB per side per night of packed beat times)
+ *   heartbeats (~150 KB per side per night of beat times)
  *
  * vitals_quality shares vitals' timestamp cutoff so each quality row dies
  * with its paired vitals row (vitals_id is a logical, unenforced reference —

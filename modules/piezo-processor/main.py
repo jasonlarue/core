@@ -37,7 +37,7 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -46,7 +46,7 @@ from common.nats_follower import create_follower
 from common.dialect import KNOWN_RECORD_TYPES, warn_unknown_type_once
 from common.side_mode import SingleSleeperMode
 from common.bed_presence import BedPresence
-from beats import BeatHistory, BeatTracker, Chunk
+from beats import STEP_S, BeatHistory, BeatTracker, Chunk
 import numpy as np
 from runtime_adapter import RuntimeCoordinator, RunContext
 from common.biometrics.frames import decode_int32_samples as _int32_samples, LOST_SAMPLE
@@ -250,18 +250,34 @@ class SingleSleeperVitals(SingleSleeperRouter[VitalsCandidate]):
 
 def write_heartbeats(holder: "DBHolder", side: str, chunk: Chunk) -> bool:
     """Insert one minute of detected beats. Replays after a restart produce
-    the same rows again, so conflicts are ignored."""
+    the same rows again, so conflicts are ignored. Failures count towards
+    the connection reset like write_vitals."""
     try:
         with holder.conn:
             holder.conn.execute(
                 "INSERT OR IGNORE INTO heartbeats (side, timestamp, beats, quality) "
                 "VALUES (?, ?, ?, ?)",
-                (side, int(chunk.start), json.dumps(chunk.beats), round(chunk.quality, 3)),
+                (side, int(chunk.start), json.dumps(chunk.beats, separators=(",", ":")),
+                 round(chunk.quality, 3)),
             )
+        holder.write_failures = 0
         return True
     except sqlite3.Error as e:
-        log.warning("write_heartbeats failed: %s", e)
+        holder.write_failures += 1
+        log.warning("write_heartbeats failed (%d consecutive): %s",
+                    holder.write_failures, e)
+        if holder.write_failures >= _DB_RECONNECT_THRESHOLD:
+            _reconnect_db(holder)
+            holder.write_failures = 0
         return False
+
+
+# Minutes held for a retry after a failed write; older ones are dropped.
+HEARTBEAT_RETRY_MAX = 30
+# A single-sleeper minute waits for the other side's tracker to finish it, but
+# no longer than this past the minute's end (s) — a stuck tracker can't hold
+# the stream back.
+HEARTBEAT_HOLD_MAX_S = 180.0
 
 
 class BeatFront:
@@ -269,13 +285,16 @@ class BeatFront:
     piezo channels plus the other side's as the noise reference. Finished
     minutes go to the heartbeats table; with one side in away mode (single
     sleeper), each minute keeps whichever side saw the sleeper's beats best,
-    stored under the home side.
+    stored under the home side. The two trackers finish a minute at
+    different times, so it is held until both are done with it; when the
+    stored minutes switch sensor, the new one starts with a break, since
+    the two trackers' beat anchors differ.
 
     A side's tracker only runs while `present(side)` holds. An empty bed
     still carries regular vibration from the pod itself, which the detector
     can mistake for a heartbeat; the vitals presence detector already tells
     the two apart, so beats follow it. Leaving the bed is a gap, so no
-    interval spans an absence."""
+    interval spans an absence, and stores the minute in progress."""
 
     def __init__(self, holder: "DBHolder", mode: SingleSleeperMode,
                  present: Callable[[str], bool] = lambda side: True):
@@ -284,24 +303,40 @@ class BeatFront:
         self._present = present
         self._was_present = {"left": False, "right": False}
         self.trackers = {"left": BeatTracker("left"), "right": BeatTracker("right")}
+        self._latest_ts: Optional[float] = None
+        # Single sleeper: minute start -> {side: chunk} awaiting the other side.
+        self._pending: Dict[int, Dict[str, Chunk]] = {}
+        # Sensor side of the last minute stored under the home side.
+        self._last_source: Optional[str] = None
+        # (storage side, chunk) whose write failed, oldest first.
+        self._retry: List[Tuple[str, Chunk]] = []
 
     def history(self, side: str) -> BeatHistory:
         return self.trackers[side].history
 
     def set_rate_hint(self, side: str, period: float) -> None:
-        self.trackers[side].set_rate_hint(period, time.time())
+        # Record time, as the tracker ages the hint against its windows.
+        at = self._latest_ts if self._latest_ts is not None else time.time()
+        self.trackers[side].set_rate_hint(period, at)
 
     def push(self, ts: float, l1: np.ndarray, l2: Optional[np.ndarray],
              r1: np.ndarray, r2: Optional[np.ndarray], masked: bool = False) -> None:
+        self._latest_ts = float(ts)
         signals = {"left": (l1, l2, r1, r2), "right": (r1, r2, l1, l2)}
+        chunks = {}
         for side, tracker in self.trackers.items():
             present = self._present(side)
             if present:
                 tracker.push(ts, *signals[side], masked=masked)
+                chunks[side] = tracker.take_chunks()
             elif self._was_present[side]:
                 tracker.gap()
+                # Nothing more is coming for the open minute until they're back.
+                chunks[side] = tracker.take_chunks(flush_before=float("inf"))
+            else:
+                chunks[side] = tracker.take_chunks()
             self._was_present[side] = present
-        self._write({s: t.take_chunks() for s, t in self.trackers.items()})
+        self._write(chunks)
 
     def gap(self) -> None:
         for t in self.trackers.values():
@@ -309,22 +344,59 @@ class BeatFront:
 
     def flush(self) -> None:
         self._write({s: t.take_chunks(flush_before=float("inf"))
-                     for s, t in self.trackers.items()})
+                     for s, t in self.trackers.items()}, force=True)
 
-    def _write(self, chunks: dict) -> None:
+    def _store(self, side: str, chunk: Chunk) -> None:
+        if not write_heartbeats(self._holder, side, chunk):
+            self._retry.append((side, chunk))
+            if len(self._retry) > HEARTBEAT_RETRY_MAX:
+                dropped = self._retry.pop(0)
+                log.warning("Dropping unwritten heartbeat minute %s/%d", dropped[0], dropped[1].start)
+
+    def _side_done(self, side: str, start: int) -> bool:
+        """True once `side`'s tracker can no longer produce minute `start`."""
+        if not self._was_present[side]:
+            return True
+        tracker = self.trackers[side]
+        if tracker._chunk_start is not None:
+            return tracker._chunk_start > start
+        end = tracker._last_committed_end
+        return end is not None and end >= start + 60 + STEP_S
+
+    def _write(self, chunks: dict, force: bool = False) -> None:
+        retry, self._retry = self._retry, []
+        for side, c in retry:
+            self._store(side, c)
         home = self._mode.home_side()
         if home is None:
+            # Minutes held from single-sleeper mode go out under their sensor's side.
+            self._release(None, force=True)
+            self._last_source = None
             for side, cs in chunks.items():
                 for c in cs:
-                    write_heartbeats(self._holder, side, c)
+                    self._store(side, c)
             return
-        by_start: dict = {}
-        for cs in chunks.values():
+        for side, cs in chunks.items():
             for c in cs:
-                by_start.setdefault(c.start, []).append(c)
-        for start in sorted(by_start):
-            best = max(by_start[start], key=lambda c: c.coverage * c.quality)
-            write_heartbeats(self._holder, home, best)
+                self._pending.setdefault(c.start, {})[side] = c
+        self._release(home, force)
+
+    def _release(self, home: Optional[str], force: bool) -> None:
+        """Store held minutes, oldest first, once neither tracker can still
+        add to them; the better side's chunk wins."""
+        for start in sorted(self._pending):
+            got = self._pending[start]
+            stale = self._latest_ts is not None and self._latest_ts > start + 60 + HEARTBEAT_HOLD_MAX_S
+            if not (force or stale or all(self._side_done(s, start)
+                                          for s in self.trackers if s not in got)):
+                break
+            del self._pending[start]
+            source, best = max(got.items(), key=lambda kv: kv[1].coverage * kv[1].quality)
+            if home is not None and self._last_source not in (None, source) \
+                    and best.beats and best.beats[0] is not None:
+                best = Chunk(best.start, [None] + best.beats, best.quality)
+            self._last_source = source
+            self._store(home or source, best)
 
 
 def report_health(status: str, message: str) -> None:
