@@ -204,6 +204,13 @@
       "when": 1791967721108,
       "tag": "0028_schedule_library",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1792415320894,
+      "tag": "0029_clear_stale_gesture_alarm_fields",
+      "breakpoints": true
     }
   ]
 }

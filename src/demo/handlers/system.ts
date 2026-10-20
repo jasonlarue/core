@@ -1,3 +1,5 @@
+import { changeRecordingPolicy, DEFAULT_RECORDING_POLICY } from '@/src/lib/recordingPolicy'
+import { flashInsights } from '@/src/lib/flashInsights'
 import type { DemoHandlers, RouterOutputs } from '../types'
 import { DAY, HOUR, MINUTE, hashSeed, seededRandom } from '../util'
 
@@ -12,6 +14,7 @@ const COMMIT = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA?.slice(0, 7) || 'de
 const COMMIT_TITLE = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_MESSAGE?.split('\n')[0] || 'Demo build'
 const loadedAt = Date.now()
 
+let recordingPolicy = { ...DEFAULT_RECORDING_POLICY }
 let internetBlocked = true
 let buildDate = new Date(loadedAt - 3 * DAY).toISOString()
 let pendingUpdateAt: number | null = null
@@ -152,17 +155,30 @@ export const system: DemoHandlers<'system'> = {
     biometricsArchive: { usedBytes: Math.round(2.6 * GB), fileCount: 168 },
   }),
 
+  getRecordingPolicy: () => recordingPolicy,
+  setRecordingPolicy: (input) => {
+    recordingPolicy = changeRecordingPolicy(recordingPolicy, input)
+    return recordingPolicy
+  },
   getStorage: () => storage(),
 
-  getFlashHealth: () => ({
-    device: 'mmcblk0',
-    name: 'C9A551',
-    capacityBytes: Math.round(29.1 * GB),
-    lifeTime: [{ minPercent: 0, maxPercent: 10 }, { minPercent: 10, maxPercent: 20 }],
-    preEol: 'normal',
-    sinceBoot: { bytes: Math.round(1.4 * GB), uptimeSeconds: Math.round((Date.now() - loadedAt) / 1000) + 9 * 3600 },
-    perDay: { bytes: Math.round(3.1 * GB), coveredHours: 168 },
-  }),
+  getFlashHealth: () => {
+    const now = Date.now()
+    return ({
+      insights: flashInsights(Array.from({ length: 169 }, (_, i) => ({
+        at: now - (168 - i) * 3_600_000,
+        bootId: 'demo',
+        sectorsWritten: Math.round((i * 120 + Math.sin(i / 3) * 25) * MB / 512),
+      })), now),
+      device: 'mmcblk0',
+      name: 'C9A551',
+      capacityBytes: Math.round(29.1 * GB),
+      lifeTime: [{ minPercent: 0, maxPercent: 10 }, { minPercent: 10, maxPercent: 20 }],
+      preEol: 'normal',
+      sinceBoot: { bytes: Math.round(1.4 * GB), uptimeSeconds: Math.round((Date.now() - loadedAt) / 1000) + 9 * 3600 },
+      perDay: { bytes: Math.round(3.1 * GB), coveredHours: 168 },
+    })
+  },
 
   freeStorage: (input) => {
     const removed = reclaimable.filter(i => input.includeDbBackups || i.kind !== 'backup')
