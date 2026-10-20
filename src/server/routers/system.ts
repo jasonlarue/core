@@ -208,6 +208,7 @@ async function unblockWan(): Promise<string> {
  *   - Allow established connections
  *   - Allow RFC 1918 LAN
  *   - Allow NTP (port 123)
+ *   - Allow mDNS (port 5353)
  *   - Allow loopback
  *   - DROP everything else
  */
@@ -233,6 +234,12 @@ async function blockWan(): Promise<void> {
   // Allow NTP
   await run(['-I', 'OUTPUT', '-p', 'udp', '--dport', '123', '-j', 'ACCEPT'])
   await run(['-I', 'INPUT', '-p', 'udp', '--sport', '123', '-j', 'ACCEPT'])
+
+  // Allow mDNS (Bonjour discovery by the apps; multicast 224.0.0.251 is
+  // outside the RFC 1918 ranges above). Same rules the startup check requires.
+  await run(['-I', 'OUTPUT', '-p', 'udp', '--dport', '5353', '-j', 'ACCEPT'])
+  await run(['-I', 'INPUT', '-p', 'udp', '--dport', '5353', '-j', 'ACCEPT'])
+  await run(['-I', 'OUTPUT', '-p', 'udp', '--sport', '5353', '-j', 'ACCEPT'])
 
   // Allow loopback
   await run(['-A', 'INPUT', '-i', 'lo', '-j', 'ACCEPT'])

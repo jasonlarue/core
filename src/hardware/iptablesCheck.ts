@@ -89,7 +89,8 @@ export function checkIptablesCached(): Promise<IptablesStatus> {
     const outputs = Object.fromEntries(chains)
     const rules = buildRequiredRules(iptables).map(rule => ({
       name: rule.name, chain: rule.chain, critical: rule.critical,
-      present: outputs[rule.chain] === null || !!outputs[rule.chain]?.includes(rule.check),
+      present: outputs[rule.chain] === null || chainAllowsAll(outputs[rule.chain] ?? '')
+        || !!outputs[rule.chain]?.includes(rule.check),
     }))
     const value = { ok: rules.every(rule => !rule.critical || rule.present), rules, repaired: [] }
     if (state.generation === generation) {
@@ -137,6 +138,16 @@ function resolveIptablesPath(override?: string): string {
 
   // Fall back to bare name and let execSync resolve via PATH
   return 'iptables'
+}
+
+/**
+ * True when a `iptables -L <chain> -n` listing shows a chain that lets
+ * everything through: policy ACCEPT and no DROP/REJECT rule. The required
+ * allow rules only matter in front of a drop, so with internet access
+ * allowed (all rules flushed) they are satisfied, not missing.
+ */
+export function chainAllowsAll(listing: string): boolean {
+  return /^Chain \S+ \(policy ACCEPT/m.test(listing) && !/^(?:DROP|REJECT)\b/m.test(listing)
 }
 
 function buildRequiredRules(iptables: string) {
@@ -196,7 +207,7 @@ export function checkIptables(iptablesPath?: string): IptablesStatus {
         encoding: 'utf-8',
         timeout: 5000,
       })
-      present = output.includes(rule.check)
+      present = chainAllowsAll(output) || output.includes(rule.check)
     }
     catch (e) {
       const msg = e instanceof Error ? e.message : ''

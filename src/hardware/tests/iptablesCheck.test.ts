@@ -189,6 +189,35 @@ describe('iptablesCheck — checkIptables rule classification', () => {
     expect(inboundMdns?.present).toBe(false)
   })
 
+  it('treats a chain that allows everything as satisfying its allow rules', async () => {
+    // Internet access allowed: every rule flushed, policy ACCEPT, nothing dropped.
+    setExecHandler(({ cmd }) => {
+      if (cmd.includes('which iptables')) return '/sbin/iptables\n'
+      if (cmd.includes('-L INPUT')) return 'Chain INPUT (policy ACCEPT)\ntarget     prot opt source               destination\n'
+      if (cmd.includes('-L OUTPUT')) return 'Chain OUTPUT (policy ACCEPT)\ntarget     prot opt source               destination\n'
+      return ''
+    })
+
+    const { checkIptables } = await import('../iptablesCheck')
+    expect(checkIptables().ok).toBe(true)
+  })
+
+  it('still requires the allow rules in front of a drop', async () => {
+    setExecHandler(({ cmd }) => {
+      if (cmd.includes('which iptables')) return '/sbin/iptables\n'
+      if (cmd.includes('-L INPUT')) return 'Chain INPUT (policy ACCEPT)\nDROP       all  --  0.0.0.0/0            0.0.0.0/0\n'
+      if (cmd.includes('-L OUTPUT')) return 'Chain OUTPUT (policy DROP)\nACCEPT     udp  --  0.0.0.0/0  0.0.0.0/0  udp dpt:123\n'
+      return ''
+    })
+
+    const { checkIptables } = await import('../iptablesCheck')
+    const result = checkIptables()
+    expect(result.ok).toBe(false)
+    expect(result.rules.find(r => r.name === 'NTP outbound (UDP 123)')?.present).toBe(true)
+    expect(result.rules.find(r => r.name === 'mDNS outbound (UDP 5353)')?.present).toBe(false)
+    expect(result.rules.find(r => r.name === 'LAN access (192.168.0.0/16)')?.present).toBe(false)
+  })
+
   it('treats Permission denied / Operation not permitted from listing as "assume ok"', async () => {
     setExecHandler(({ cmd }) => {
       if (cmd.includes('which iptables')) return '/sbin/iptables\n'
