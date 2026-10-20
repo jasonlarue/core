@@ -2117,6 +2117,35 @@ class TestBeatFrontRouting:
         front._write({"left": [], "right": [Chunk(180, [None, 40, 1040], 0.9)]})
         assert [r[2] for r in _hb_rows(conn)] == [[0, 1000, 2000], [None, 80, 1080, 2080], [None, 40, 1040]]
 
+    def test_a_held_minute_keeps_the_home_side_it_was_queued_for(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        self._occupied(front, 120, 60)  # right still inside minute 60
+        front._write({"left": [Chunk(60, [0, 1000], 0.8)], "right": []})
+        front._mode.home = "right"
+        self._occupied(front, 120, 120)
+        front._write({"left": [], "right": []})
+        assert _hb_rows(conn) == [("left", 60, [0, 1000], 0.8)]
+
+    def test_leaving_single_sleeper_mode_stores_held_minutes_first(self):
+        from beats import Chunk
+        front, conn = self._front("left")
+        self._occupied(front, 120, 60)
+        front._write({"left": [Chunk(60, [0, 1000], 0.8)], "right": []})
+        front._mode.home = None
+        front._write({"left": [Chunk(120, [0, 1000], 0.8)], "right": [Chunk(120, [5, 1005], 0.7)]})
+        assert [(r[0], r[1]) for r in _hb_rows(conn)] == [("left", 60), ("left", 120), ("right", 120)]
+
+    def test_entering_single_sleeper_mode_breaks_at_a_sensor_switch(self):
+        """Per-side minutes from the left sensor, then the right sensor wins
+        under the left side: no interval may span the two."""
+        from beats import Chunk
+        front, conn = self._front(None)
+        front._write({"left": [Chunk(60, [0, 1000], 0.9)], "right": []})
+        front._mode.home = "left"
+        front._write({"left": [Chunk(120, [0], 0.2)], "right": [Chunk(120, [80, 1080], 0.9)]})
+        assert [r[2] for r in _hb_rows(conn)] == [[0, 1000], [None, 80, 1080]]
+
     def test_leaving_the_bed_stores_the_minute_in_progress(self):
         import main
         import numpy as np

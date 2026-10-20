@@ -306,10 +306,13 @@ class BeatFront:
         self._was_present = {"left": False, "right": False}
         self.trackers = {"left": BeatTracker("left"), "right": BeatTracker("right")}
         self._latest_ts: Optional[float] = None
-        # Single sleeper: minute start -> {side: chunk} awaiting the other side.
-        self._pending: Dict[int, Dict[str, Chunk]] = {}
-        # Sensor side of the last minute stored under the home side.
-        self._last_source: Optional[str] = None
+        # Single sleeper: minute start -> (home side when it was queued,
+        # {sensor side: chunk}) awaiting the other side. The home side is
+        # kept so a mode change while it waits doesn't reroute it.
+        self._pending: Dict[int, Tuple[str, Dict[str, Chunk]]] = {}
+        # Storage side -> sensor side of the last minute stored there. Never
+        # reset: a mode change can switch sensors too.
+        self._last_source: Dict[str, str] = {}
         # (storage side, chunk) whose write failed, oldest first.
         self._retry: List[Tuple[str, Chunk]] = []
 
@@ -348,6 +351,16 @@ class BeatFront:
         self._write({s: t.take_chunks(flush_before=float("inf"))
                      for s, t in self.trackers.items()}, force=True)
 
+    def _store_from(self, side: str, source: str, chunk: Chunk) -> None:
+        """Store `source` sensor's chunk under `side`. A minute from another
+        sensor than the last one stored there starts with a break: the two
+        trackers' beat anchors differ, so no interval may span them."""
+        last = self._last_source.get(side)
+        if last is not None and last != source and chunk.beats and chunk.beats[0] is not None:
+            chunk = Chunk(chunk.start, [None] + chunk.beats, chunk.quality)
+        self._last_source[side] = source
+        self._store(side, chunk)
+
     def _store(self, side: str, chunk: Chunk) -> None:
         if not write_heartbeats(self._holder, side, chunk):
             self._retry.append((side, chunk))
@@ -371,34 +384,31 @@ class BeatFront:
             self._store(side, c)
         home = self._mode.home_side()
         if home is None:
-            # Minutes held from single-sleeper mode go out under their sensor's side.
-            self._release(None, force=True)
-            self._last_source = None
+            # Leaving single-sleeper mode: held minutes go out as they were
+            # queued, before any per-side minute.
+            self._release(force=True)
             for side, cs in chunks.items():
                 for c in cs:
-                    self._store(side, c)
+                    self._store_from(side, side, c)
             return
         for side, cs in chunks.items():
             for c in cs:
-                self._pending.setdefault(c.start, {})[side] = c
-        self._release(home, force)
+                self._pending.setdefault(c.start, (home, {}))[1][side] = c
+        self._release(force)
 
-    def _release(self, home: Optional[str], force: bool) -> None:
+    def _release(self, force: bool) -> None:
         """Store held minutes, oldest first, once neither tracker can still
-        add to them; the better side's chunk wins."""
+        add to them: the better side's chunk, under the home side the minute
+        was queued for."""
         for start in sorted(self._pending):
-            got = self._pending[start]
+            home, got = self._pending[start]
             stale = self._latest_ts is not None and self._latest_ts > start + 60 + HEARTBEAT_HOLD_MAX_S
             if not (force or stale or all(self._side_done(s, start)
                                           for s in self.trackers if s not in got)):
                 break
             del self._pending[start]
             source, best = max(got.items(), key=lambda kv: kv[1].coverage * kv[1].quality)
-            if home is not None and self._last_source not in (None, source) \
-                    and best.beats and best.beats[0] is not None:
-                best = Chunk(best.start, [None] + best.beats, best.quality)
-            self._last_source = source
-            self._store(home or source, best)
+            self._store_from(home, source, best)
 
 
 def report_health(status: str, message: str) -> None:
