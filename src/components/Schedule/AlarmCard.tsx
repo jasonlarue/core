@@ -30,7 +30,7 @@ export interface AlarmGroup {
   enabled: boolean
 }
 
-/** "9 min snooze" or "9 min snooze −20%" (Snooze taper). */
+/** "9 min snooze" or "9 min snooze −30%" (Snooze taper). */
 export function snoozeSummary(group: Pick<AlarmGroup, 'snoozeDuration' | 'snoozeTaper'>): string {
   const minutes = Math.round(group.snoozeDuration / 6) / 10
   return `${minutes} min snooze${group.snoozeTaper > 0 ? ` −${group.snoozeTaper}%` : ''}`

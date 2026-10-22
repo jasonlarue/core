@@ -58,9 +58,9 @@ fire again at the set time. See `src/scheduler/wakeWindow.ts`.
 ## Snooze length and Snooze taper
 
 Each alarm sets how long a snooze lasts (`snoozeDuration`, 1–30 minutes,
-default 5) and an optional **Snooze taper** (`snoozeTaper`: off, 20, 30, 40,
-50 or 60%). With a taper, each later snooze of the same alarm is that much
-shorter than the one before — 9 min at 20% gives 9, 7.2, 5.8, 4.6 min… — so
+default 5) and an optional **Snooze taper** (`snoozeTaper`: off, 30, 40, 50
+or 60%). With a taper, each later snooze of the same alarm is that much
+shorter than the one before — 9 min at 30% gives 9, 6.3, 4.4, 3.1 min… — so
 you ease out of bed instead of drifting back to sleep. A snooze never gets
 shorter than a minute (`MIN_SNOOZE_SECONDS`).
 

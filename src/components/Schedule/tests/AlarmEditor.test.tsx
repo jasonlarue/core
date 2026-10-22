@@ -31,7 +31,7 @@ const group: AlarmGroup = {
   alarmTemperature: 84,
   wakeWindow: 20,
   snoozeDuration: 120,
-  snoozeTaper: 20,
+  snoozeTaper: 30,
   enabled: false,
 }
 
@@ -112,7 +112,7 @@ describe('AlarmEditor', () => {
       alarmTemperature: 85,
       wakeWindow: 20,
       snoozeDuration: 120,
-      snoozeTaper: 20,
+      snoozeTaper: 30,
       enabled: false,
     })
   })
@@ -184,8 +184,9 @@ describe('AlarmEditor', () => {
   it('shows and saves the snooze length and Snooze taper', async () => {
     const s = render(<AlarmEditor open onClose={vi.fn()} side="left" existingGroup={group} />)
     const taper = within(s.getByRole('tablist', { name: 'Snooze taper' }))
-    expect(taper.getByRole('tab', { name: '20' }).getAttribute('aria-selected')).toBe('true')
-    expect(s.getByText(/Each snooze is 20% shorter than the last.*: 2, 1\.6, 1\.3, 1 min/)).toBeTruthy()
+    expect(taper.getByRole('tab', { name: '30' }).getAttribute('aria-selected')).toBe('true')
+    expect(taper.queryByRole('tab', { name: '20' })).toBeNull()
+    expect(s.getByText(/Each snooze is 30% shorter than the last.*: 2, 1\.4, 1, 1 min/)).toBeTruthy()
 
     fireEvent.click(taper.getByRole('tab', { name: '50' }))
     fireEvent.click(s.getByRole('button', { name: /Increase snooze length/i }))

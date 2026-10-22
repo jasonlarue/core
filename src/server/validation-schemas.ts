@@ -90,7 +90,7 @@ export const snoozeDurationSchema = z
  * Snooze taper: percent by which each later snooze of the same alarm is
  * shorter than the one before. 0 turns it off.
  */
-export const SNOOZE_TAPER_PERCENTS = [0, 20, 30, 40, 50, 60] as const
+export const SNOOZE_TAPER_PERCENTS = [0, 30, 40, 50, 60] as const
 export const snoozeTaperSchema = z
   .number()
   .int()

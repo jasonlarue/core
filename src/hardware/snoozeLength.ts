@@ -10,8 +10,8 @@ export const MIN_SNOOZE_SECONDS = 60
 /**
  * Length of the next snooze for the alarm ringing with `config`: the alarm's
  * snooze length (or `fallbackSeconds` for an alarm without one), shortened
- * by its snooze taper for each snooze already taken — 9 min at 20% gives 9,
- * 7.2, 5.8, 4.6 min… — but never under MIN_SNOOZE_SECONDS (or the base
+ * by its snooze taper for each snooze already taken — 9 min at 30% gives 9,
+ * 6.3, 4.4, 3.1 min… — but never under MIN_SNOOZE_SECONDS (or the base
  * length, if that is shorter).
  */
 export function nextSnoozeSeconds(config: AlarmConfig, fallbackSeconds = 300): number {

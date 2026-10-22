@@ -631,6 +631,34 @@ describe('schedules.alarm CRUD', () => {
     expect(updated.wakeWindow).toBe(30)
   })
 
+  it('defaults the snooze to 5 minutes without a taper and stores chosen ones', async () => {
+    const plain = await caller.createAlarmSchedule({
+      side: 'left', dayOfWeek: 'monday', time: '07:00',
+      vibrationIntensity: 50, duration: 120, alarmTemperature: 80,
+    } as any)
+    expect([plain.snoozeDuration, plain.snoozeTaper]).toEqual([300, 0])
+
+    const tapered = await caller.createAlarmSchedule({
+      side: 'left', dayOfWeek: 'tuesday', time: '07:00',
+      vibrationIntensity: 50, duration: 120, alarmTemperature: 80, snoozeDuration: 540, snoozeTaper: 30,
+    })
+    expect([tapered.snoozeDuration, tapered.snoozeTaper]).toEqual([540, 30])
+  })
+
+  it.each([
+    [{ snoozeTaper: 20 }],
+    [{ snoozeTaper: 70 }],
+    [{ snoozeDuration: 30 }],
+    [{ snoozeDuration: 1801 }],
+  ])('rejects snooze settings %j', async (snooze) => {
+    await expect(
+      caller.createAlarmSchedule({
+        side: 'left', dayOfWeek: 'monday', time: '07:00',
+        vibrationIntensity: 50, duration: 120, alarmTemperature: 80, ...snooze,
+      } as any)
+    ).rejects.toThrow()
+  })
+
   it.each([5, 25, 45, -10, 12.5])('rejects a %s minute wake window', async (wakeWindow) => {
     await expect(
       caller.createAlarmSchedule({

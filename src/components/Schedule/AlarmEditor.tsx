@@ -59,7 +59,6 @@ const MAX_SNOOZE_MINUTES = 30
 
 const SNOOZE_TAPER_OPTIONS = [
   { value: '0', label: 'Off' },
-  { value: '20', label: '20' },
   { value: '30', label: '30' },
   { value: '40', label: '40' },
   { value: '50', label: '50' },
@@ -67,7 +66,7 @@ const SNOOZE_TAPER_OPTIONS = [
 ] as const
 type SnoozeTaperOption = typeof SNOOZE_TAPER_OPTIONS[number]['value']
 
-/** "9, 7.2, 5.8, 4.6 min": the first snoozes of an alarm with this taper. */
+/** "9, 6.3, 4.4, 3.1 min": the first snoozes of an alarm with this taper. */
 export function snoozeTaperPreview(minutes: number, taper: number, count = 4): string {
   const lengths = Array.from({ length: count }, (_, snoozeCount) =>
     Math.round(nextSnoozeSeconds({ vibrationIntensity: 0, vibrationPattern: 'rise', duration: 0, snoozeDuration: minutes * 60, snoozeTaper: taper, snoozeCount }) / 6) / 10)
