@@ -22,9 +22,10 @@ vi.mock('@/src/hooks/useSideNames', () => ({ useSideNames: () => ({ leftName: 'J
 vi.mock('@/src/hooks/useTemperatureUnit', () => ({ useTemperatureUnit: () => ({ unit: 'F' }) }))
 
 import { AlarmSection, groupAlarms } from '../AlarmSection'
+import { snoozeSummary } from '../AlarmCard'
 
 const row = (id: number, dayOfWeek: string, over: Record<string, unknown> = {}) => ({
-  id, side: 'left', dayOfWeek, time: '06:45', vibrationIntensity: 100, vibrationPattern: 'rise', duration: 10, alarmTemperature: 84, wakeWindow: 0, enabled: true, ...over,
+  id, side: 'left', dayOfWeek, time: '06:45', vibrationIntensity: 100, vibrationPattern: 'rise', duration: 10, alarmTemperature: 84, wakeWindow: 0, snoozeDuration: 300, snoozeTaper: 0, enabled: true, ...over,
 })
 
 beforeEach(() => {
@@ -49,6 +50,22 @@ describe('groupAlarms', () => {
     expect(groups[0]).toMatchObject({ ids: [1, 2], days: ['monday', 'friday'], time: '06:45' })
     expect(groups[1]).toMatchObject({ ids: [5], duration: 30 })
     expect(groups[2]).toMatchObject({ ids: [3, 4], days: ['sunday', 'saturday'], enabled: false })
+  })
+})
+
+describe('groupAlarms snooze', () => {
+  it('keeps alarms with different snooze settings in separate groups', () => {
+    const groups = groupAlarms([
+      row(1, 'monday', { snoozeDuration: 540, snoozeTaper: 20 }),
+      row(2, 'tuesday', { snoozeDuration: 540, snoozeTaper: 20 }),
+      row(3, 'wednesday', { snoozeDuration: 540 }),
+    ] as never)
+    expect(groups.map(g => [g.ids, g.snoozeDuration, g.snoozeTaper])).toEqual([[[1, 2], 540, 20], [[3], 540, 0]])
+  })
+
+  it('summarizes the snooze length and Snooze taper', () => {
+    expect(snoozeSummary({ snoozeDuration: 540, snoozeTaper: 0 })).toBe('9 min snooze')
+    expect(snoozeSummary({ snoozeDuration: 90, snoozeTaper: 30 })).toBe('1.5 min snooze −30%')
   })
 })
 
@@ -81,7 +98,7 @@ describe('AlarmSection', () => {
     m.query = { data: { alarm: [row(1, 'saturday', { enabled: false }), row(2, 'sunday', { enabled: false })] }, isLoading: false, error: null }
     const s = render(<AlarmSection side="left" />)
     expect(s.getByText('6:45 AM')).toBeTruthy()
-    expect(s.getByText('10s buzz · rise · 84°')).toBeTruthy()
+    expect(s.getByText('10s buzz · rise · 84° · 5 min snooze')).toBeTruthy()
     expect(s.getByText('paused')).toBeTruthy()
     expect(s.getByText('1')).toBeTruthy()
   })
@@ -90,7 +107,7 @@ describe('AlarmSection', () => {
     m.query = { data: { alarm: [row(1, 'monday', { wakeWindow: 20 })] }, isLoading: false, error: null }
     const s = render(<AlarmSection side="left" />)
     expect(s.getByText('· 10s buzz · 20 min window')).toBeTruthy()
-    expect(s.getByText('10s buzz · rise · 84° · 20 min window')).toBeTruthy()
+    expect(s.getByText('10s buzz · rise · 84° · 20 min window · 5 min snooze')).toBeTruthy()
   })
 
   it('tests an alarm on the listed side with its stored vibration', () => {

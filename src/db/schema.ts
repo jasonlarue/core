@@ -175,6 +175,7 @@ export const tapGestures = sqliteTable('tap_gestures', {
   temperatureAmount: integer('temperature_amount'), // 0-10
   // For alarm actions
   alarmBehavior: text('alarm_behavior', { enum: ['snooze', 'dismiss'] }),
+  // No longer read: the snooze length is set per alarm (alarm_schedules).
   alarmSnoozeDuration: integer('alarm_snooze_duration'), // 60-600 seconds
   alarmInactiveBehavior: text('alarm_inactive_behavior', {
     enum: ['power', 'none'],
@@ -291,6 +292,11 @@ export const alarmSchedules = sqliteTable('alarm_schedules', {
   alarmTemperature: real('alarm_temperature').notNull(), // Temperature during alarm
   // Minutes before `time` in which movement fires the alarm early; 0 = off.
   wakeWindow: integer('wake_window').notNull().default(0),
+  // How long a snooze lasts (seconds), and Snooze taper: each later snooze of
+  // the same alarm is this percent shorter (0 = off). Tap gestures and the
+  // HomeKit switch snooze with these.
+  snoozeDuration: integer('snooze_duration').notNull().default(300),
+  snoozeTaper: integer('snooze_taper').notNull().default(0),
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()

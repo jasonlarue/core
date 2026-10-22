@@ -74,6 +74,8 @@ const SCHEMA_SQL = `
       duration INTEGER NOT NULL,
       alarm_temperature REAL NOT NULL,
       wake_window INTEGER NOT NULL DEFAULT 0,
+      snooze_duration INTEGER NOT NULL DEFAULT 300,
+      snooze_taper INTEGER NOT NULL DEFAULT 0,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -1487,7 +1489,7 @@ describe('schedules openapi meta + input schema contract', () => {
     expect(Object.keys(power).sort()).toEqual(
       ['createdAt', 'dayOfWeek', 'enabled', 'endAction', 'id', 'offTime', 'onTemperature', 'onTime', 'side', 'updatedAt'])
     expect(Object.keys(alarm).sort()).toEqual(
-      ['alarmTemperature', 'createdAt', 'dayOfWeek', 'duration', 'enabled', 'id', 'side', 'time', 'updatedAt', 'vibrationIntensity', 'vibrationPattern', 'wakeWindow'])
+      ['alarmTemperature', 'createdAt', 'dayOfWeek', 'duration', 'enabled', 'id', 'side', 'snoozeDuration', 'snoozeTaper', 'time', 'updatedAt', 'vibrationIntensity', 'vibrationPattern', 'wakeWindow'])
 
     for (const collection of [await c.getAll({ side: 'left' }), await c.getByDay({ side: 'left', dayOfWeek: 'monday' })]) {
       expect(Object.keys(collection).sort()).toEqual(['alarm', 'power', 'temperature'])
