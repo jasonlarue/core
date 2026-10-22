@@ -5,7 +5,7 @@
 import type { AlarmConfig } from './alarmPersistence'
 
 /** The shortest a tapered snooze gets. */
-export const MIN_SNOOZE_SECONDS = 60
+export const MIN_SNOOZE_SECONDS = 5
 
 /**
  * Length of the next snooze for the alarm ringing with `config`: the alarm's

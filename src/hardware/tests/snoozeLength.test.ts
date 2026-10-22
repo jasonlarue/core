@@ -20,9 +20,11 @@ describe('nextSnoozeSeconds', () => {
     expect(lengths).toEqual([540, 432, 346, 276])
   })
 
-  it('never goes under a minute, or the set length if that is shorter', () => {
-    expect(nextSnoozeSeconds({ ...alarm, snoozeDuration: 300, snoozeTaper: 60, snoozeCount: 5 })).toBe(MIN_SNOOZE_SECONDS)
-    expect(nextSnoozeSeconds({ ...alarm, snoozeDuration: 30, snoozeTaper: 60, snoozeCount: 5 })).toBe(30)
+  it('tapers below a minute but never under 5 seconds, or the set length if that is shorter', () => {
+    expect(MIN_SNOOZE_SECONDS).toBe(5)
+    expect(nextSnoozeSeconds({ ...alarm, snoozeDuration: 60, snoozeTaper: 60, snoozeCount: 2 })).toBe(10)
+    expect(nextSnoozeSeconds({ ...alarm, snoozeDuration: 300, snoozeTaper: 60, snoozeCount: 5 })).toBe(5)
+    expect(nextSnoozeSeconds({ ...alarm, snoozeDuration: 3, snoozeTaper: 60, snoozeCount: 5 })).toBe(3)
   })
 
   it('ignores out-of-range taper and counts', () => {

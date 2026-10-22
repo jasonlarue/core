@@ -363,7 +363,7 @@ export function AlarmEditor({
         </div>
         <span className="text-xs leading-[1.4] text-fg-3">
           {snoozeTaper > 0
-            ? `Each snooze is ${snoozeTaper}% shorter than the last, so you ease out of bed instead of drifting back off: ${snoozeTaperPreview(snoozeMinutes, snoozeTaper)}… (never under 1 min).`
+            ? `Each snooze is ${snoozeTaper}% shorter than the last, so you ease out of bed instead of drifting back off: ${snoozeTaperPreview(snoozeMinutes, snoozeTaper)}…`
             : `Every snooze lasts ${snoozeMinutes} min. Snooze taper makes each one shorter than the last.`}
         </span>
       </div>

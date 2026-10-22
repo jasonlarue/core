@@ -62,7 +62,7 @@ default 5) and an optional **Snooze taper** (`snoozeTaper`: off, 30, 40, 50
 or 60%). With a taper, each later snooze of the same alarm is that much
 shorter than the one before — 9 min at 30% gives 9, 6.3, 4.4, 3.1 min… — so
 you ease out of bed instead of drifting back to sleep. A snooze never gets
-shorter than a minute (`MIN_SNOOZE_SECONDS`).
+shorter than 5 seconds (`MIN_SNOOZE_SECONDS`).
 
 The scheduled alarm carries both settings in its `AlarmConfig`, and
 `snoozeManager` brings a snoozed alarm back with `snoozeCount` one higher;

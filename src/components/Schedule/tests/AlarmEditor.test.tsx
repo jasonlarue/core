@@ -186,11 +186,11 @@ describe('AlarmEditor', () => {
     const taper = within(s.getByRole('tablist', { name: 'Snooze taper' }))
     expect(taper.getByRole('tab', { name: '30' }).getAttribute('aria-selected')).toBe('true')
     expect(taper.queryByRole('tab', { name: '20' })).toBeNull()
-    expect(s.getByText(/Each snooze is 30% shorter than the last.*: 2, 1\.4, 1, 1 min/)).toBeTruthy()
+    expect(s.getByText(/Each snooze is 30% shorter than the last.*: 2, 1\.4, 1, 0\.7 min…$/)).toBeTruthy()
 
     fireEvent.click(taper.getByRole('tab', { name: '50' }))
     fireEvent.click(s.getByRole('button', { name: /Increase snooze length/i }))
-    expect(s.getByText(/Each snooze is 50% shorter than the last.*: 3, 1\.5, 1, 1 min/)).toBeTruthy()
+    expect(s.getByText(/Each snooze is 50% shorter than the last.*: 3, 1\.5, 0\.8, 0\.4 min…$/)).toBeTruthy()
     fireEvent.click(saveButton(s))
     await waitFor(() => expect(m.batch.mutateAsync).toHaveBeenCalled())
     expect(m.batch.mutateAsync.mock.calls[0][0].creates.alarm[0]).toMatchObject({ snoozeDuration: 180, snoozeTaper: 50 })
