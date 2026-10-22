@@ -353,7 +353,7 @@ export function AlarmEditor({
           />
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <span className="flex-1 text-sm">Snooze taper</span>
+          <span className="flex-1 whitespace-nowrap text-sm">Snooze taper</span>
           <SegmentedControl<SnoozeTaperOption>
             size="sm"
             ariaLabel="Snooze taper"
