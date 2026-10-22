@@ -142,12 +142,19 @@ function resolveIptablesPath(override?: string): string {
 
 /**
  * True when a `iptables -L <chain> -n` listing shows a chain that lets
- * everything through: policy ACCEPT and no DROP/REJECT rule. The required
- * allow rules only matter in front of a drop, so with internet access
- * allowed (all rules flushed) they are satisfied, not missing.
+ * everything through: policy ACCEPT and only ACCEPT/LOG/RETURN rules. The
+ * required allow rules only matter in front of a drop, so with internet
+ * access allowed (all rules flushed) they are satisfied, not missing. Any
+ * other target — DROP, REJECT, or a jump to a custom chain that may drop
+ * (e.g. scripts/internet-control's SLEEPYPOD-BLOCK) — falls back to the
+ * exact-rule check.
  */
 export function chainAllowsAll(listing: string): boolean {
-  return /^Chain \S+ \(policy ACCEPT/m.test(listing) && !/^(?:DROP|REJECT)\b/m.test(listing)
+  const lines = listing.split('\n')
+  if (!lines.some(l => /^Chain \S+ \(policy ACCEPT/.test(l))) return false
+  return lines
+    .filter(l => l.trim() && !/^(?:Chain|target)\b/.test(l))
+    .every(l => /^(?:ACCEPT|LOG|RETURN)\b/.test(l))
 }
 
 function buildRequiredRules(iptables: string) {
