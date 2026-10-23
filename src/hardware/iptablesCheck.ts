@@ -153,7 +153,8 @@ export function chainAllowsAll(listing: string): boolean {
   const lines = listing.split('\n')
   if (!lines.some(l => /^Chain \S+ \(policy ACCEPT/.test(l))) return false
   return lines
-    .filter(l => l.trim() && !/^(?:Chain|target)\b/.test(l))
+    .filter(l => l.trim() && !/^Chain \S+ \(policy ACCEPT[^)]*\)\s*$/.test(l)
+      && !/^target\s+prot\s+opt\s+source\s+destination\s*$/.test(l))
     .every(l => /^(?:ACCEPT|LOG|RETURN)\b/.test(l))
 }
 

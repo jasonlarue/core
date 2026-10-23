@@ -532,3 +532,16 @@ describe('iptablesCheck — checkAndRepairIptables', () => {
     log.mockRestore()
   })
 })
+
+it.each(['target', 'Chain'])('retains a jump named %s when checking whether a chain is open', async (target) => {
+  const { chainAllowsAll, checkIptables } = await import('../iptablesCheck')
+  const listing = `Chain OUTPUT (policy ACCEPT)
+target     prot opt source               destination
+${target}     all  --  0.0.0.0/0            0.0.0.0/0
+`
+  expect(chainAllowsAll(listing)).toBe(false)
+  setExecHandler(() => listing)
+  const status = checkIptables('/sbin/iptables')
+  expect(status.rules.every(rule => !rule.present)).toBe(true)
+  expect(status.ok).toBe(false)
+})
