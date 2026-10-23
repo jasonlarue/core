@@ -83,6 +83,7 @@ export function AlarmCard({ group, onEdit, onTest, isTesting = false }: AlarmCar
             {group.duration}
             s buzz
             {group.wakeWindow > 0 && ` · ${group.wakeWindow} min window`}
+            {` · ${snoozeSummary(group)}`}
           </span>
         </span>
         <span className="mt-1 hidden font-mono text-[11px] text-fg-3 min-[900px]:block">

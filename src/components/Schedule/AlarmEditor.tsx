@@ -119,7 +119,8 @@ export function AlarmEditor({
   const [duration, setDuration] = useState(DEFAULT_DURATION)
   const [displayTemperature, setDisplayTemperature] = useState(defaultDisplayTemp)
   const [wakeWindow, setWakeWindow] = useState(0)
-  const [snoozeMinutes, setSnoozeMinutes] = useState(DEFAULT_SNOOZE_MINUTES)
+  const [snoozeDuration, setSnoozeDuration] = useState(DEFAULT_SNOOZE_MINUTES * 60)
+  const snoozeMinutes = snoozeDuration / 60
   const [snoozeTaper, setSnoozeTaper] = useState(0)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [testing, setTesting] = useState(false)
@@ -144,7 +145,7 @@ export function AlarmEditor({
       setDuration(existingGroup.duration)
       setDisplayTemperature(Math.round(setpointFToDisplay(existingGroup.alarmTemperature, unit) ?? existingGroup.alarmTemperature))
       setWakeWindow(existingGroup.wakeWindow)
-      setSnoozeMinutes(Math.max(1, Math.round(existingGroup.snoozeDuration / 60)))
+      setSnoozeDuration(existingGroup.snoozeDuration)
       setSnoozeTaper(existingGroup.snoozeTaper)
     }
     else {
@@ -156,7 +157,7 @@ export function AlarmEditor({
       setDuration(DEFAULT_DURATION)
       setDisplayTemperature(defaultDisplayTemp)
       setWakeWindow(0)
-      setSnoozeMinutes(DEFAULT_SNOOZE_MINUTES)
+      setSnoozeDuration(DEFAULT_SNOOZE_MINUTES * 60)
       setSnoozeTaper(0)
     }
     setSaveError(null)
@@ -210,7 +211,7 @@ export function AlarmEditor({
       duration,
       alarmTemperature: temperatureF,
       wakeWindow,
-      snoozeDuration: snoozeMinutes * 60,
+      snoozeDuration,
       snoozeTaper,
       enabled,
     })))
@@ -228,7 +229,7 @@ export function AlarmEditor({
     catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to save alarm')
     }
-  }, [days, sides, time, intensity, pattern, duration, displayTemperature, wakeWindow, snoozeMinutes, snoozeTaper, unit, existingGroup, batchUpdate, utils, onSaved, onClose])
+  }, [days, sides, time, intensity, pattern, duration, displayTemperature, wakeWindow, snoozeDuration, snoozeTaper, unit, existingGroup, batchUpdate, utils, onSaved, onClose])
 
   const clock = formatTime(time)
   const [clockDigits, clockPeriod] = clock.split(' ')
@@ -344,7 +345,7 @@ export function AlarmEditor({
           <span className="flex-1 text-sm">Snooze for</span>
           <Stepper
             value={snoozeMinutes}
-            onChange={setSnoozeMinutes}
+            onChange={minutes => setSnoozeDuration(Math.round(minutes * 60))}
             min={1}
             max={MAX_SNOOZE_MINUTES}
             format={v => `${v} min`}

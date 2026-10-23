@@ -106,7 +106,7 @@ describe('AlarmSection', () => {
   it('shows the wake window in both mobile and desktop alarm details', () => {
     m.query = { data: { alarm: [row(1, 'monday', { wakeWindow: 20 })] }, isLoading: false, error: null }
     const s = render(<AlarmSection side="left" />)
-    expect(s.getByText('· 10s buzz · 20 min window')).toBeTruthy()
+    expect(s.getByText('· 10s buzz · 20 min window · 5 min snooze')).toBeTruthy()
     expect(s.getByText('10s buzz · rise · 84° · 20 min window · 5 min snooze')).toBeTruthy()
   })
 
@@ -158,4 +158,13 @@ describe('AlarmSection', () => {
     expect(within(dialog).getByText('New alarm')).toBeTruthy()
     expect(within(dialog).getByRole('tab', { name: 'Both' }).getAttribute('aria-selected')).toBe('true')
   })
+})
+
+it('shows distinct snooze settings in mobile alarm details', () => {
+  m.query = { data: { alarm: [row(1, 'monday', { snoozeDuration: 540, snoozeTaper: 30 }), row(2, 'monday')] }, isLoading: false, error: null }
+  const s = render(<AlarmSection side="left" />)
+  for (const summary of ['· 10s buzz · 9 min snooze −30%', '· 10s buzz · 5 min snooze']) {
+    const details = s.getByText(summary)
+    expect(details.className).toBe('min-[900px]:hidden')
+  }
 })
