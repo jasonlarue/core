@@ -21,7 +21,7 @@ import { HardwareCommand } from '@/src/hardware/types'
 import { broadcastMutationStatus } from '@/src/streaming/broadcastMutationStatus'
 import { cancelAutoOffTimer } from '@/src/services/autoOffWatcher'
 import { markSideMutated } from '@/src/hardware/deviceStateSync'
-import { markAlarmStarted, type AlarmConfig } from '@/src/hardware/alarmState'
+import { getActiveAlarmConfig, markAlarmStarted, type AlarmConfig } from '@/src/hardware/alarmState'
 import { ringLinked } from '@/src/hardware/linkedAlarm'
 import { shouldBlock as pumpStallShouldBlock } from '@/src/hardware/pumpStallGuard'
 import { withSideLock } from '@/src/hardware/sideLock'
@@ -738,6 +738,8 @@ export class JobManager {
     const partner = rang?.linkedSide
     if (rang && partner) {
       await withSideLock(partner, async () => {
+        // Stopped or replaced while waiting for this lock: don't ring the other side.
+        if (getActiveAlarmConfig(sched.side) !== rang) return
         markSideMutated(partner)
         await ringLinked(getSharedHardwareClient(), sched.side, rang)
       })

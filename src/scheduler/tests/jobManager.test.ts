@@ -2260,6 +2260,32 @@ describe('JobManager residual mutation contracts', () => {
     }
   })
 
+  it('does not ring the other side when the alarm was stopped while waiting for its lock', async () => {
+    const { getActiveAlarmConfig, markAlarmEnded, suspendActiveAlarms } = await import('@/src/hardware/alarmState')
+    vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(false)
+    vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ bedMode: 'solo-left', unusedZoneMode: 'follow' })
+    let release!: () => void
+    const lockHeld = withSideLock('right', () => new Promise<void>((resolve) => {
+      release = resolve
+    }))
+    try {
+      const run = manager.runAlarmJob({
+        ...row, id: 47, side: 'left', dayOfWeek: 'monday', time: '06:50', alarmTemperature: 80,
+        wakeWindow: 0, snoozeDuration: 120, snoozeTaper: 50, vibrationIntensity: 100, vibrationPattern: 'rise', duration: 120,
+      })
+      // The sleeper's side rang, then a Stop ended it before the other side's lock freed.
+      await vi.waitFor(() => expect(getActiveAlarmConfig('left')).not.toBeNull())
+      await markAlarmEnded('left')
+      release()
+      await lockHeld
+      await run
+      expect(hardwareClient.setAlarm).toHaveBeenCalledTimes(1)
+    }
+    finally {
+      suspendActiveAlarms()
+    }
+  })
+
   it('keeps a two-sleeper alarm on its own side', async () => {
     vi.spyOn(manager as any, 'isSidePowered').mockResolvedValue(false)
     vi.spyOn(manager as any, 'awayModes').mockResolvedValue({ bedMode: 'two' })
