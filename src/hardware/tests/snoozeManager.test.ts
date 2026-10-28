@@ -117,6 +117,23 @@ describe('snoozeManager', () => {
     expect(mockMarkAlarmStarted).toHaveBeenCalledWith('right', { ...solo, snoozeCount: 1, linkedSide: 'left' })
   })
 
+  it('cancels a linked snooze taken on the other side when either side is stopped', async () => {
+    // Tapped on the unused right side: the snooze is recorded there only.
+    snoozeAlarm('right', 60, { ...config, linkedSide: 'left', ownerSide: 'left' })
+    snoozeAlarm('left', 60, config)
+    cancelSnooze('left')
+    expect(getSnoozeStatus('right').active).toBe(false)
+    expect(loadAlarmState().snoozes.right).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(mockSetAlarm).not.toHaveBeenCalled()
+  })
+
+  it('leaves the other side\'s unlinked snooze alone', () => {
+    snoozeAlarm('right', 60, config)
+    cancelSnooze('left')
+    expect(getSnoozeStatus('right').active).toBe(true)
+  })
+
   it('counts each snooze of the same alarm', async () => {
     snoozeAlarm('left', 60, { ...config, snoozeCount: 2 })
     await vi.advanceTimersByTimeAsync(60_000)
